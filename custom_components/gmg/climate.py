@@ -1,19 +1,14 @@
 """Green Mountain Grill"""
 
 
-from ast import Not
-from html import entities
-from importlib.metadata import entry_points
 from .gmg import grills, grill
 #from gmg import grills,grill
 import logging
 from typing import List, Optional
-from homeassistant.components.climate import ClimateEntity
-from homeassistant.components.climate.const import (
-    HVAC_MODE_OFF, HVAC_MODE_HEAT, SUPPORT_TARGET_TEMPERATURE, HVAC_MODE_HEAT, HVAC_MODE_OFF, HVAC_MODE_FAN_ONLY)
+from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature, HVACMode
 from homeassistant.const import (
     ATTR_TEMPERATURE,
-    TEMP_FAHRENHEIT)
+    UnitOfTemperature)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +37,8 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
 
 class GmgGrill(ClimateEntity):
     """Representation of a Green Mountain Grill smoker"""
+
+    _enable_turn_on_off_backwards_compatibility = False
 
     def __init__(self, grill) -> None:
         """Initialize the Grill."""
@@ -82,11 +79,11 @@ class GmgGrill(ClimateEntity):
 
     def set_hvac_mode(self, hvac_mode: str) -> None:
         """Set the operation mode"""
-        if hvac_mode == HVAC_MODE_HEAT:
+        if hvac_mode == HVACMode.HEAT:
             self._grill.power_on()
-        elif hvac_mode == HVAC_MODE_OFF:
+        elif hvac_mode == HVACMode.OFF:
             self._grill.power_off()
-        elif hvac_mode == HVAC_MODE_FAN_ONLY:
+        elif hvac_mode == HVACMode.FAN_ONLY:
             self._grill.power_on_cool()
         else:
             _LOGGER.error(f"Unsupported hvac mode: {hvac_mode}")
@@ -96,11 +93,15 @@ class GmgGrill(ClimateEntity):
     def turn_off(self):
         """Turn device off."""
         return self._grill.power_off()
+
+    def turn_on(self):
+        """Turn device on."""
+        return self._grill.power_on()
     
     @property
     def supported_features(self):
         """Return the list of supported features."""
-        return (SUPPORT_TARGET_TEMPERATURE)
+        return ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
     
     @property
     def icon(self):
@@ -109,17 +110,17 @@ class GmgGrill(ClimateEntity):
     @property
     def hvac_modes(self) -> List[str]:
         """Return the supported operations."""
-        return [HVAC_MODE_HEAT, HVAC_MODE_FAN_ONLY, HVAC_MODE_OFF]
+        return [HVACMode.HEAT, HVACMode.FAN_ONLY, HVACMode.OFF]
 
     @property
     def hvac_mode(self):
         """Return current HVAC operation."""
         if self._state['on'] == 1:
-            return HVAC_MODE_HEAT
+            return HVACMode.HEAT
         elif self._state['on'] == 2:
-            return HVAC_MODE_FAN_ONLY
+            return HVACMode.FAN_ONLY
 
-        return HVAC_MODE_OFF
+        return HVACMode.OFF
 
     @property
     def name(self)  -> None:
@@ -131,7 +132,7 @@ class GmgGrill(ClimateEntity):
     def temperature_unit(self) -> None:
         """Return the unit of measurement for the grill"""
         # intial tests look like raw value always in F not C even when set in the app. 
-        return TEMP_FAHRENHEIT
+        return UnitOfTemperature.FAHRENHEIT
 
     @property
     def current_temperature(self) -> None:
@@ -172,6 +173,8 @@ class GmgGrill(ClimateEntity):
 class GmgGrillProbe(ClimateEntity):
     """Representation of a Green Mountain Grill smoker food probes"""
 
+    _enable_turn_on_off_backwards_compatibility = False
+
     def __init__(self, grill, probe_count) -> None:
         """Initialize the Grill."""
         self._grill = grill
@@ -207,7 +210,7 @@ class GmgGrillProbe(ClimateEntity):
     @property
     def hvac_modes(self) -> List[str]:
         """Return the supported operations."""
-        return [HVAC_MODE_OFF]
+        return [HVACMode.OFF]
 
     @property
     def hvac_mode(self):
@@ -215,14 +218,14 @@ class GmgGrillProbe(ClimateEntity):
 
         # Probe temp is 89 when it is not plugged in... need to find out if better way to find if connected or not..
         if self._state['on'] == 1 and self._state[f'probe{self._probe_count}_temp'] != 89:
-            return HVAC_MODE_HEAT
+            return HVACMode.HEAT
 
-        return HVAC_MODE_OFF
+        return HVACMode.OFF
 
     @property
     def supported_features(self):
         """Return the list of supported features."""
-        return (SUPPORT_TARGET_TEMPERATURE)
+        return ClimateEntityFeature.TARGET_TEMPERATURE
     
     @property
     def icon(self):
@@ -237,7 +240,7 @@ class GmgGrillProbe(ClimateEntity):
     def temperature_unit(self) -> None:
         """Return the unit of measurement for the probe"""
         # intial tests look like raw value always in F not C even when set in the app. 
-        return TEMP_FAHRENHEIT
+        return UnitOfTemperature.FAHRENHEIT
 
     @property
     def current_temperature(self) -> None:
