@@ -39,6 +39,13 @@ _LOGGER = logging.getLogger(__name__)
 UDP_PORT = 8080
 CODE_SERIAL = b"UL!"
 CODE_STATUS = b"UR001!"
+# "UN!" -- confirmed against github.com/brandenco/green-mountain-grill's
+# CommandGetGrillFirmware, which matches every other command code this
+# project already had independently verified. Not previously implemented
+# here; the response's exact format is unconfirmed (assumed to decode as
+# plain text, same as the serial number response), so it's surfaced as-is
+# rather than parsed into structured fields.
+CODE_FIRMWARE = b"UN!"
 
 
 class GmgCommunicationError(Exception):
@@ -158,6 +165,20 @@ class Grill:
 
         self._serial_number = response.decode("utf-8", errors="ignore")
         return self._serial_number
+
+    def firmware(self) -> str | None:
+        """Fetch the grill's firmware version, once, at setup.
+
+        Not polled -- firmware doesn't change mid-cook, and there's no
+        reason to spend a UDP round-trip on it every 30 seconds. Returns
+        None on failure rather than raising, since this is diagnostic
+        information, not something that should block setup or a status
+        poll if it's temporarily unavailable.
+        """
+        response = self.send(CODE_FIRMWARE)
+        if response is None:
+            return None
+        return response.decode("utf-8", errors="ignore").strip()
 
     def set_temp(self, target_temp: int):
         """Set the grill's target temperature."""

@@ -19,6 +19,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = GmgDataUpdateCoordinator(hass, grill)
     await coordinator.async_config_entry_first_refresh()
 
+    # Firmware doesn't change mid-cook -- fetched once here, not on every
+    # 30-second poll. Best-effort: grill.firmware() returns None on
+    # failure rather than raising, so a hiccup here never blocks setup.
+    coordinator.firmware_version = await hass.async_add_executor_job(grill.firmware)
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

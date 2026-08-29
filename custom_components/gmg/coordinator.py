@@ -26,6 +26,7 @@ class GmgDataUpdateCoordinator(DataUpdateCoordinator):
 
     def __init__(self, hass: HomeAssistant, grill: Grill) -> None:
         self.grill = grill
+        self.firmware_version: str | None = None
         super().__init__(
             hass,
             _LOGGER,

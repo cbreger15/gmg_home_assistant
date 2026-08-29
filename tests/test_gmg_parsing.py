@@ -41,7 +41,7 @@ def _load(fullname: str, filename: str):
     return module
 
 
-_load("custom_components.gmg.const", "const.py")
+_const = _load("custom_components.gmg.const", "const.py")
 _gmg = _load("custom_components.gmg.gmg", "gmg.py")
 
 Grill = _gmg.Grill
@@ -99,11 +99,90 @@ def test_short_response_raises_instead_of_hanging_or_crashing():
     assert raised, "a too-short response must raise, not crash on a raw IndexError or return partial state"
 
 
+def test_combine_temp_matches_hand_computation():
+    # Spot checks independent of the fixtures above -- e.g. a value that
+    # genuinely needs the high byte (can't fit in one byte alone), proving
+    # the combination isn't a no-op that happens to pass on values under 256.
+    assert Grill._combine_temp(low=94, high=1) == 350  # (1 << 8) + 94
+    assert Grill._combine_temp(low=0, high=0) == 0
+    assert Grill._combine_temp(low=255, high=0) == 255
+    assert Grill._combine_temp(low=0, high=1) == 256  # exactly where a single byte overflows
+
+
+def test_set_temp_command_bytes():
+    g = Grill("10.0.0.1", "TEST")
+    calls = []
+    g.send = lambda msg, timeout=1: calls.append(msg) or b""
+    g.set_temp(350)
+    assert calls == [b"UT350!"]
+
+
+def test_set_temp_probe_command_bytes():
+    g = Grill("10.0.0.1", "TEST")
+    calls = []
+    g.send = lambda msg, timeout=1: calls.append(msg) or b""
+    g.set_temp_probe(165, probe_number=1)
+    g.set_temp_probe(165, probe_number=2)
+    assert calls == [b"UF165!", b"Uf165!"]
+
+
+def test_power_commands_match_reference_project():
+    g = Grill("10.0.0.1", "TEST")
+    calls = []
+    g.send = lambda msg, timeout=1: calls.append(msg) or b""
+    g.power_on()
+    g.power_on_cool()
+    g.power_off()
+    assert calls == [b"UK001!", b"UK002!", b"UK004!"]
+
+
+def test_set_temp_rejects_out_of_range():
+    g = Grill("10.0.0.1", "TEST")
+    for bad in (100, 501):
+        try:
+            g.set_temp(bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, f"set_temp({bad}) should reject a value outside 150-500"
+
+
+def test_firmware_command_and_parsing():
+    g = Grill("10.0.0.1", "TEST")
+    # Exact response format is unconfirmed (see gmg.py's firmware() docstring) --
+    # this only tests what firmware() actually does: decode and strip
+    # whitespace, not a specific real value.
+    g.send = lambda msg, timeout=1: b"  1.2.3  " if msg == b"UN!" else None
+    assert g.firmware() == "1.2.3"
+
+    g.send = lambda msg, timeout=1: None
+    assert g.firmware() is None, "a failed firmware fetch must return None, not raise"
+
+
+def test_is_probe_connected_boundaries():
+    is_probe_connected = _const.is_probe_connected
+    assert is_probe_connected(None) is None
+    assert is_probe_connected(32) is True  # MIN_TEMP_F_PROBE
+    assert is_probe_connected(257) is True  # MAX_TEMP_F_PROBE
+    assert is_probe_connected(31) is False
+    assert is_probe_connected(258) is False
+    assert is_probe_connected(601) is False  # the real disconnected sentinel
+
+
 if __name__ == "__main__":
-    test_power_off()
-    print("test_power_off: PASS")
-    test_power_on_cold_smoke()
-    print("test_power_on_cold_smoke: PASS")
-    test_short_response_raises_instead_of_hanging_or_crashing()
-    print("test_short_response_raises_instead_of_hanging_or_crashing: PASS")
-    print("\nAll assertions passed against real captured payloads.")
+    tests = [
+        test_power_off,
+        test_power_on_cold_smoke,
+        test_short_response_raises_instead_of_hanging_or_crashing,
+        test_combine_temp_matches_hand_computation,
+        test_set_temp_command_bytes,
+        test_set_temp_probe_command_bytes,
+        test_power_commands_match_reference_project,
+        test_set_temp_rejects_out_of_range,
+        test_firmware_command_and_parsing,
+        test_is_probe_connected_boundaries,
+    ]
+    for t in tests:
+        t()
+        print(f"{t.__name__}: PASS")
+    print(f"\nAll {len(tests)} tests passed.")

@@ -5,6 +5,31 @@ while unblocking it for a current Home Assistant install, not assumed --
 see gmg.py's module docstring for the specifics on what's provably a bug
 versus what's preserved on purpose.
 
+## Added in 3.1.0
+
+- **Firmware version.** `UN!` ("get grill firmware") is in the reference
+  project's own command set (`brandenco/green-mountain-grill`) and matches
+  the naming convention of every other command this fork already had
+  independently confirmed -- not previously implemented here. Fetched
+  once at setup (not polled -- firmware doesn't change mid-cook) and shown
+  as the device's `sw_version` in Home Assistant's device page. The exact
+  response format is unconfirmed, so it's decoded as plain text and
+  surfaced as-is rather than parsed into structured fields.
+- **`homeassistant` minimum version pin** (`2025.1.0`) added to the
+  manifest. Given the entire reason this fork exists is an HA-version
+  compatibility break in the original project, it seemed worth actually
+  preventing installation on an HA version too old for the modern APIs
+  this fork now depends on, rather than repeating the same failure mode
+  from the other direction.
+- **CI.** `.github/workflows/test.yml` now runs `tests/test_gmg_parsing.py`
+  and a syntax check on every push/PR, instead of relying on remembering
+  to run them by hand.
+- **Expanded test suite:** command-byte-building for every outgoing
+  command (confirmed against the reference project's own command set),
+  `set_temp`'s range validation, `is_probe_connected`'s boundaries, and
+  the new firmware command's success/failure paths. 10 tests total, all
+  pure Python, runnable without any Home Assistant test harness.
+
 ## Fixed
 
 - **Infinite loop on no response.** `grill.status()`'s retry condition was

@@ -1,0 +1,32 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  parsing-tests:
+    name: Protocol parsing tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Run protocol parsing tests
+        run: python tests/test_gmg_parsing.py
+
+  syntax-check:
+    name: Syntax check every module
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Compile-check all Python files
+        run: |
+          for f in custom_components/gmg/*.py; do
+            python -m py_compile "$f"
+          done

@@ -22,5 +22,5 @@ class GmgEntity(CoordinatorEntity[GmgDataUpdateCoordinator]):
             identifiers={(DOMAIN, serial)},
             name=f"Green Mountain Grill {serial}",
             manufacturer="Green Mountain Grill",
-            configuration_url=None,
+            sw_version=coordinator.firmware_version,
         )

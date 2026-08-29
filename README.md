@@ -29,8 +29,9 @@ One device per grill, with:
 - **Warning** (binary sensor) -- the grill's own warning state
 - **Fire state / Fire state percentage** (diagnostic sensors) -- fire state shows a friendly name (e.g. `off`, `cold_smoke`) where one is confirmed
 - **Raw Status** (diagnostic sensor, disabled by default) -- every byte of the last response, for anyone digging further into what the protocol has left undecoded
+- **Firmware version** -- shown on the device page (`sw_version`), fetched once at setup
 
-Temperature readings above 255°F, and cold-smoke mode detection, were both fixed in 3.0.0 after cross-checking against an independent reverse-engineering of this same protocol with real captured test data -- see [CHANGES.md](CHANGES.md) for the full verification writeup, including a runnable test (`tests/test_gmg_parsing.py`) that proves it against that real data rather than just asserting it.
+Temperature readings above 255°F, and cold-smoke mode detection, were both fixed in 3.0.0 after cross-checking against an independent reverse-engineering of this same protocol with real captured test data -- see [CHANGES.md](CHANGES.md) for the full verification writeup, including a runnable test (`tests/test_gmg_parsing.py`) that proves it against that real data rather than just asserting it. CI now runs that test suite (10 tests) on every push.
 
 ## Known limitations
 
