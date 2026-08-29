@@ -201,7 +201,7 @@ class Grill:
         values = list(raw)
 
         try:
-            return {
+            parsed = {
                 "on": values[30],
                 "temp": values[2],
                 "temp_high": values[3],
@@ -223,3 +223,17 @@ class Grill:
             raise GmgCommunicationError(
                 f"Status response shorter than expected ({len(values)} bytes): {raw!r}"
             ) from err
+
+        # Every byte, indexed by position, alongside the named fields above.
+        # A meaningful chunk of this payload isn't decoded anywhere in this
+        # project's history -- there may be real signal in the unused
+        # indices (hopper level, run time, an error code, ambient temp),
+        # but guessing at meanings without a real grill to correlate
+        # against is how the probe-disconnected heuristic already in this
+        # codebase happened. This is the tool for finding more of those
+        # safely: watch which index changes when you do something specific
+        # to the grill, then promote it to a named field in const.py once
+        # confirmed. See sensor.py's raw status entity and CHANGES.md.
+        parsed["_raw_bytes"] = values
+
+        return parsed

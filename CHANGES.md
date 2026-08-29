@@ -62,10 +62,25 @@ versus what's preserved on purpose.
   documented and centralized in one constant instead of a magic number
   buried in a property getter.
 
+## Added in 2.1.0
+
+- **Raw Status sensor.** Only 16 of the response's bytes are decoded into
+  named fields anywhere in this project's history -- the rest may hold real
+  signal (hopper level, run time, an error code, ambient temp) that's never
+  been identified. `sensor.*_raw_status` exposes every byte, indexed by
+  position, as an attribute -- disabled by default (it's a
+  reverse-engineering tool, not a day-to-day entity). Watch which index
+  changes when you do something specific to the grill, confirm it holds
+  across more than one observation, then promote it to a named field in
+  `const.py`/`gmg.py` the same way the existing 16 fields were identified.
+
 ## Known gaps, not addressed here
 
 - Fire state is exposed as a raw numeric code. Its meaning per value isn't
   independently documented; worth mapping to friendly text once confirmed
-  against a real grill.
+  against a real grill -- the new Raw Status sensor is the tool for
+  confirming it, not a guess made here.
+- Whatever's in the currently-undecoded bytes (see Raw Status sensor above)
+  hasn't been identified. This release makes it observable, not decoded.
 - Test coverage doesn't yet cover the new sensor/number/binary_sensor/
   config_flow modules -- only the original bare component-setup test exists.

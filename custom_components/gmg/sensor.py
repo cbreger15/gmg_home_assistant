@@ -85,6 +85,7 @@ async def async_setup_entry(
     entities += [
         GmgDiagnosticSensor(coordinator, description) for description in DIAGNOSTIC_SENSORS
     ]
+    entities.append(GmgRawStatusSensor(coordinator))
 
     async_add_entities(entities)
 
@@ -121,3 +122,40 @@ class GmgProbeTemperatureSensor(GmgDiagnosticSensor):
             return False
         value = self.coordinator.data.get(self.entity_description.value_key)
         return value is not None and value != PROBE_DISCONNECTED_TEMP_F
+
+
+class GmgRawStatusSensor(GmgEntity, SensorEntity):
+    """Every byte of the last status response, indexed by position.
+
+    Only a subset of this payload is decoded anywhere in this project's
+    history (see gmg.py). This entity exists to make finding more of it
+    safe: watch which index changes when you do something specific to the
+    grill (open the lid, run low on pellets, hit an error), then promote
+    that index to a named field in const.py once you've confirmed it
+    across more than one observation. Disabled by default -- it's a
+    reverse-engineering tool, not something to leave polling and logging
+    state changes on every poll cycle for day-to-day use.
+    """
+
+    _attr_name = "Raw Status"
+    _attr_icon = "mdi:code-braces"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.grill.serial_number}_raw_status"
+
+    @property
+    def native_value(self) -> int:
+        """Byte count of the last response -- itself a useful signal if it ever changes."""
+        return len(self.coordinator.data.get("_raw_bytes", []))
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        raw: list[int] = self.coordinator.data.get("_raw_bytes", [])
+        return {
+            "raw_bytes": raw,
+            "raw_hex": bytes(raw).hex() if raw else None,
+            **{f"byte_{i}": value for i, value in enumerate(raw)},
+        }
