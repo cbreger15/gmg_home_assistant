@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Select your Green Mountain Grill",
+        "description": "Discovered on your network:",
+        "data": {
+          "serial_number": "Grill"
+        }
+      }
+    },
+    "error": {
+      "not_found": "That grill could not be found. Try again."
+    },
+    "abort": {
+      "no_grills_found": "No Green Mountain Grills were found on the network. Make sure the grill is powered on and UDP port 8080 is reachable from Home Assistant.",
+      "already_configured": "This grill is already configured."
+    }
+  }
+}

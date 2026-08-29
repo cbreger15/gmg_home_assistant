@@ -1,60 +1,36 @@
 # Green Mountain Grill for Home Assistant
 
-## **WARNING** This compoment is still in development. Use with caution!  
+Fork of [jwhitby91/gmg_home_assistant](https://github.com/jwhitby91/gmg_home_assistant), rewritten to fix a few real bugs found while unblocking it for a current Home Assistant install, and to model probes properly instead of as fake thermostats. See [CHANGES.md](CHANGES.md) for the full list of what changed and why.
+
+If `jwhitby91/gmg_home_assistant` ever ships its own current release, prefer that one -- this fork exists to be usable in the meantime, not to replace it.
 
 ## Installation
 
-Install via HACS 
+Via HACS:
 
-<ul>
-    <li>click 3 dots in top right</li>
-    <li>Custom Repositories</li>
-    <li>add this github URI as integration</li>
-    <li>click add</li>
-    </br>
-    <li>click Exlore & download repo bottom right</li>
-    <li>Search & select Green Mountain Grill</li>
-    <li>Click install</li>
-</ul>
+1. HACS → ⋮ (top right) → Custom repositories
+2. Add `https://github.com/cbreger15/gmg_home_assistant` as an Integration
+3. Install, then restart Home Assistant
 
-Add below to configuration.yaml in home assistant
+## Setup
 
-```yaml
-    climate:
-        - platform: gmg
-```
+**Settings → Devices & Services → Add Integration → Green Mountain Grill.** The integration broadcasts on the local network and lists whatever it finds -- pick your grill. No YAML required.
 
-## Requirements 
+Requires UDP port 8080 to be reachable between Home Assistant and the grill.
 
-<ul>
-    <li>UDP port 8080 open between home assistant & GMG</li>
-    <li>Auto discovery will discover multiple GMG devices if on same network as home assistant</li>
-</ul>
+## What you get
 
-## TODO 
+One device per grill, with:
 
-<ul>
-    <li>Sensors for
-        <ul>
-            <li>food probes (temperature monitor.. set temperature etc.) - in development.. Set them up as climate as you can set temp for them </li>
-            <li>
-                <ul>
-                    <li>Need to better detect when probes are unplugged</li>
-                </ul>
-            </li>
-            <li>Warning states..</li>
-            <li>Fire States</li>
-        </ul>
-    </li>
-    <li>Test cold smoke mode</li>
-    <li>Change Home assistant to use config flow for easier set up</li>
-</ul>
+- **Climate entity** -- the grill itself: on/off, cold-smoke mode, target temperature (the controller won't accept a new setpoint below 150°F, same restriction as the GMG app itself)
+- **Probe 1 / Probe 2 temperature** (sensor) -- current reading, unavailable rather than a misleading number when nothing's plugged in
+- **Probe 1 / Probe 2 target temperature** (number) -- the alarm/target temp, settable directly, meant to be wired into an automation for "notify me when the probe hits temp" rather than treated as a pretend thermostat
+- **Probe 1 / Probe 2 connected** (binary sensor) -- whether a probe is actually plugged in
+- **Warning** (binary sensor) -- the grill's own warning state
+- **Fire state / Fire state percentage** (diagnostic sensors)
 
-## Test list
+## Known limitations
 
-<ul>
-    <li>Power on - successful</li>
-    <li>Power off - successful</li>
-    <li>Set temp - successful </br><b>Notes:</b> as recommended in GMG manual you shouldn't change temp until it reaches 150 F so I put in check to only change temp once that has been reached</li> 
-    <li>Probes - successful</li>
-</ul>
+- Fire state is exposed as a raw numeric code -- the meaning of each value isn't independently documented anywhere, so it isn't translated to friendly text here. Worth mapping once someone's confirmed what the values actually mean against a real grill.
+- Cold-smoke mode is wired up but not extensively tested.
+- The "probe connected" check is a heuristic (a specific raw temperature value the grill reports for an empty probe jack) -- there's no dedicated connected/disconnected flag in the protocol.
