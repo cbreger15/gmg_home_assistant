@@ -27,10 +27,14 @@ One device per grill, with:
 - **Probe 1 / Probe 2 target temperature** (number) -- the alarm/target temp, settable directly, meant to be wired into an automation for "notify me when the probe hits temp" rather than treated as a pretend thermostat
 - **Probe 1 / Probe 2 connected** (binary sensor) -- whether a probe is actually plugged in
 - **Warning** (binary sensor) -- the grill's own warning state
-- **Fire state / Fire state percentage** (diagnostic sensors)
+- **Fire state / Fire state percentage** (diagnostic sensors) -- fire state shows a friendly name (e.g. `off`, `cold_smoke`) where one is confirmed
+- **Raw Status** (diagnostic sensor, disabled by default) -- every byte of the last response, for anyone digging further into what the protocol has left undecoded
+
+Temperature readings above 255°F, and cold-smoke mode detection, were both fixed in 3.0.0 after cross-checking against an independent reverse-engineering of this same protocol with real captured test data -- see [CHANGES.md](CHANGES.md) for the full verification writeup, including a runnable test (`tests/test_gmg_parsing.py`) that proves it against that real data rather than just asserting it.
 
 ## Known limitations
 
-- Fire state is exposed as a raw numeric code -- the meaning of each value isn't independently documented anywhere, so it isn't translated to friendly text here. Worth mapping once someone's confirmed what the values actually mean against a real grill.
-- Cold-smoke mode is wired up but not extensively tested.
-- The "probe connected" check is a heuristic (a specific raw temperature value the grill reports for an empty probe jack) -- there's no dedicated connected/disconnected flag in the protocol.
+- Fire state's friendly names: only `off` and `cold_smoke` are independently confirmed; the rest are plausible, not certain (detail in CHANGES.md).
+- `warnState` is read as a combined 4-byte value now, consistent with everything else that's been verified, but hasn't itself been checked against a real non-zero warning.
+- The "probe connected" check is a heuristic (a probe reading outside its own physical range) -- there's no dedicated connected/disconnected flag in the protocol, but this is now a principled range check rather than a hardcoded magic number.
+- Cold-smoke mode is wired up and its status detection is now confirmed against real data, but the actual cooking behavior in that mode isn't extensively tested.

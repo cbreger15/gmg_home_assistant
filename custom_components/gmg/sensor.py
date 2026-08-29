@@ -22,7 +22,8 @@ from .const import (
     ATTR_PROBE1_TEMP,
     ATTR_PROBE2_TEMP,
     DOMAIN,
-    PROBE_DISCONNECTED_TEMP_F,
+    FIRE_STATE_NAMES,
+    is_probe_connected,
 )
 from .coordinator import GmgDataUpdateCoordinator
 from .entity import GmgEntity
@@ -82,9 +83,11 @@ async def async_setup_entry(
     entities: list[SensorEntity] = [
         GmgProbeTemperatureSensor(coordinator, description) for description in PROBE_SENSORS
     ]
-    entities += [
-        GmgDiagnosticSensor(coordinator, description) for description in DIAGNOSTIC_SENSORS
-    ]
+    for description in DIAGNOSTIC_SENSORS:
+        if description.key == "fire_state":
+            entities.append(GmgFireStateSensor(coordinator, description))
+        else:
+            entities.append(GmgDiagnosticSensor(coordinator, description))
     entities.append(GmgRawStatusSensor(coordinator))
 
     async_add_entities(entities)
@@ -107,12 +110,35 @@ class GmgDiagnosticSensor(GmgEntity, SensorEntity):
         return self.coordinator.data.get(self.entity_description.value_key)
 
 
+class GmgFireStateSensor(GmgDiagnosticSensor):
+    """Fire state, as a friendly name where one is known.
+
+    Only "off" (1) and "cold_smoke" (198) are independently confirmed
+    against real captured payloads (see const.py). The others are carried
+    over from an independent reverse-engineering project's own enum but
+    unconfirmed here -- if one of those shows up, it's worth treating as
+    "probably right, worth double-checking" rather than certain. The raw
+    numeric code is always available as an attribute regardless.
+    """
+
+    @property
+    def native_value(self):
+        value = self.coordinator.data.get(self.entity_description.value_key)
+        if value is None:
+            return None
+        return FIRE_STATE_NAMES.get(value, f"unknown_{value}")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {"raw_code": self.coordinator.data.get(self.entity_description.value_key)}
+
+
 class GmgProbeTemperatureSensor(GmgDiagnosticSensor):
     """A food probe's current temperature.
 
     Reads as unavailable rather than a plausible-looking number when the
-    probe isn't actually plugged in -- see binary_sensor.py for the same
-    "disconnected" heuristic, kept in one place instead of scattered
+    probe isn't actually plugged in -- see const.py's is_probe_connected
+    for the range-check heuristic, kept in one place instead of scattered
     across entities as it was in the original climate-entity version.
     """
 
@@ -121,7 +147,7 @@ class GmgProbeTemperatureSensor(GmgDiagnosticSensor):
         if not super().available:
             return False
         value = self.coordinator.data.get(self.entity_description.value_key)
-        return value is not None and value != PROBE_DISCONNECTED_TEMP_F
+        return bool(is_probe_connected(value))
 
 
 class GmgRawStatusSensor(GmgEntity, SensorEntity):

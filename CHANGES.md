@@ -48,19 +48,72 @@ versus what's preserved on purpose.
   single device via `DeviceInfo`, instead of three unrelated top-level
   entities named by raw serial number.
 
-## Preserved on purpose, not touched
+## Fixed in 3.0.0 -- a real, independently-verified temperature bug
 
-- The actual wire-format parsing in `Grill._parse_status` (`list(raw_bytes)`,
-  indexed by byte position) is exactly what the original did. It isn't
-  documented anywhere independently of this project's own commit history,
-  so it wasn't safe to reinterpret without a real grill to verify against --
-  getting that wrong would mean silently wrong temperature readings, not
-  just a code-quality issue.
-- The 150°F minimum-before-setpoint-change rule, straight from the GMG
-  manual per the original author's testing notes.
-- The "probe disconnected at 89°F" heuristic -- still a heuristic, now
-  documented and centralized in one constant instead of a magic number
-  buried in a property getter.
+2.1.0's Raw Status sensor was built specifically to find more of this
+protocol safely instead of guessing. That search turned up
+[brandenco/green-mountain-grill](https://github.com/brandenco/green-mountain-grill)
+(MIT licensed), an independent Go reverse-engineering of this exact same
+protocol -- including real captured payloads with known-correct expected
+output as test fixtures. Its command codes (`UT%03d!`, `UK001!`, `UK002!`,
+`UK004!`, etc.) match this project's exactly, which is what made it worth
+taking seriously rather than dismissing as an unrelated guess.
+
+Its fixtures were hand-recomputed here from scratch, independently -- not
+trusted blindly -- and every field matched. `tests/test_gmg_parsing.py`
+reproduces that verification as a real, runnable test using those exact
+byte sequences.
+
+- **Temperature readings above 255°F were being silently truncated or
+  wrong.** Every temperature field (`temp`, `grill_set_temp`, both probes'
+  current and set temperatures) is actually a 16-bit value split across a
+  low byte and a "_high" byte -- `(high << 8) + low`. The original
+  implementation, and this fork through 2.1.0, parsed and even exposed the
+  "_high" fields but never combined them into anything -- they sat unused
+  in the state dict. Since this grill's own documented range goes up to
+  500°F, and a single byte tops out at 255, this was a real correctness
+  gap for a meaningful chunk of its actual operating range, not an edge
+  case. Confirmed by hand-recomputing both of the reference project's real
+  captured payloads: every combined value matches their documented
+  expected output exactly.
+- **Cold-smoke mode was misdetected as "Off."** The original mapped
+  `on == 2` to cold-smoke/`HVACMode.FAN_ONLY`. A real captured "power on
+  cold smoke" payload shows `on == 3`, not 2 -- confirmed by hand
+  recomputation, not just read off the reference project's claim. Fixed
+  in `climate.py`; `on == 2` is a distinct, unconfirmed state neither
+  project has a real example of, and is left falling through to "Off"
+  rather than guessed at.
+- **Probe-disconnected detection was reading the wrong byte.** The
+  original single-byte read happened to see `89` for a disconnected probe
+  -- but that's the low byte of a combined value that's actually `601`,
+  confirmed identically across both probes in both of the reference
+  project's real payloads. `601` is outside a probe's real physical range
+  (32-257°F), which is what's actually checked now
+  (`const.is_probe_connected`) instead of hardcoding either magic number --
+  a range check degrades safely even if the exact sentinel value varies.
+- **`warnState` was reading 1 byte of what is very likely a 4-byte value**
+  (indices 24-27, combined the same way as the temperature fields). Fixed
+  to match. Both known real payloads have all four bytes at zero (no
+  active warning), so unlike the temperature fix above, this specific
+  combination hasn't been confirmed against a real non-zero warning --
+  but reading only 1 of 4 bytes was provably incomplete regardless of
+  what the correct combination turns out to be.
+- **Fire state now exposes a friendly name** (`sensor.*_fire_state`
+  returns e.g. `"off"` or `"cold_smoke"` instead of a bare number) where
+  one is reasonably known. Only `off` (1) and `cold_smoke` (198) are
+  confirmed against real captured payloads; `default`/`startup`/`running`/
+  `cooldown`/`fail` are carried over from the reference project's own enum
+  but unconfirmed here -- worth double-checking if one of those shows up,
+  not treating as certain. The raw numeric code is always available as an
+  attribute.
+
+**What's still just this fork's own history, unverified against anything
+independent:** the actual index-to-field mapping itself (that byte 2 is
+grill temp, byte 4 is probe 1, etc.) -- the reference project agrees with
+it exactly, which is reassuring, but neither project's author has stated
+where that original mapping came from. The 150°F minimum-before-setpoint-
+change rule is unrelated to any of this -- it's from the GMG manual per
+this project's own original testing notes, not the wire protocol.
 
 ## Added in 2.1.0
 
@@ -76,11 +129,17 @@ versus what's preserved on purpose.
 
 ## Known gaps, not addressed here
 
-- Fire state is exposed as a raw numeric code. Its meaning per value isn't
-  independently documented; worth mapping to friendly text once confirmed
-  against a real grill -- the new Raw Status sensor is the tool for
-  confirming it, not a guess made here.
-- Whatever's in the currently-undecoded bytes (see Raw Status sensor above)
-  hasn't been identified. This release makes it observable, not decoded.
-- Test coverage doesn't yet cover the new sensor/number/binary_sensor/
-  config_flow modules -- only the original bare component-setup test exists.
+- Fire state's friendly names are only 2-of-7 independently confirmed (see
+  3.0.0 above) -- the rest are plausible, not certain.
+- `warnState`'s 4-byte combination is structurally consistent with
+  everything else that has been confirmed, but hasn't itself been checked
+  against a real non-zero warning -- both known payloads show zero.
+- Whatever's in the currently-undecoded bytes (see Raw Status sensor,
+  added 2.1.0) hasn't been identified. It's observable now, not decoded.
+- `PowerState == 2` ("fan," per the reference project's own enum) has no
+  confirmed real example in either project and isn't mapped to anything.
+- Test coverage now includes `tests/test_gmg_parsing.py` (the protocol
+  parsing itself, runnable without any Home Assistant test harness) but
+  still doesn't cover the entity-layer modules (sensor/number/
+  binary_sensor/config_flow) -- those still only have the original bare
+  component-setup test.

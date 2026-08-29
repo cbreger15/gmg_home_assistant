@@ -191,33 +191,52 @@ class Grill:
         return self.send(b"UK004!")
 
     @staticmethod
+    def _combine_temp(low: int, high: int) -> int:
+        """Combine a temperature's low/high byte pair into one value.
+
+        Confirmed against github.com/brandenco/green-mountain-grill's own
+        test fixtures (independently reverse-engineered, MIT licensed) --
+        hand-recomputed here, not just trusted: (high << 8) + low matches
+        every temperature field in both of that project's captured real
+        payloads, including the probe-disconnected sentinel (601, which
+        the original single-byte-only parsing in this project's history
+        read as a coincidentally-similar-looking 89). Above 255F this is
+        not optional -- the low byte alone cannot represent it at all.
+        """
+        return (high << 8) + low
+
+    @staticmethod
     def _parse_status(raw: bytes) -> dict:
-        # The original implementation parsed this as list(raw_bytes) -- one
-        # integer per byte, indexed directly. That indexing is preserved
-        # exactly here. It is not documented anywhere independently of this
-        # project's own history, so it is not safe to reinterpret without a
-        # real grill to verify against -- getting this wrong would mean
-        # silently wrong temperature readings, not just a code-quality bug.
+        # The overall byte layout (which index means what) is preserved
+        # from this project's own history. The VALUE at each temperature
+        # index is now combined with its paired high byte -- see
+        # _combine_temp's docstring for why this isn't optional above
+        # 255F, and CHANGES.md for the full verification writeup.
         values = list(raw)
 
         try:
             parsed = {
                 "on": values[30],
-                "temp": values[2],
-                "temp_high": values[3],
-                "grill_set_temp": values[6],
-                "grill_set_temp_high": values[7],
-                "probe1_temp": values[4],
-                "probe1_temp_high": values[5],
-                "probe1_set_temp": values[28],
-                "probe1_set_temp_high": values[29],
-                "probe2_temp": values[16],
-                "probe2_temp_high": values[17],
-                "probe2_set_temp": values[18],
-                "probe2_set_temp_high": values[19],
+                "temp": Grill._combine_temp(values[2], values[3]),
+                "grill_set_temp": Grill._combine_temp(values[6], values[7]),
+                "probe1_temp": Grill._combine_temp(values[4], values[5]),
+                "probe1_set_temp": Grill._combine_temp(values[28], values[29]),
+                "probe2_temp": Grill._combine_temp(values[16], values[17]),
+                "probe2_set_temp": Grill._combine_temp(values[18], values[19]),
                 "fireState": values[32],
                 "fireStatePercentage": values[33],
-                "warnState": values[24],
+                # Original single-byte read of warnState (index 24 alone) is
+                # very likely incomplete: the independent reference project
+                # treats this as a 4-byte value spanning indices 24-27,
+                # combined the same way CurveRemainTime is. Both known real
+                # payloads have all four bytes at 0 (no active warning), so
+                # this specific combination hasn't been confirmed against a
+                # real non-zero warning the way the temperature fields have
+                # -- but reading only 1 of 4 bytes is provably incomplete
+                # either way, so it's fixed here rather than left as-is.
+                "warnState": (
+                    (values[27] << 24) + (values[26] << 16) + (values[25] << 8) + values[24]
+                ),
             }
         except IndexError as err:
             raise GmgCommunicationError(

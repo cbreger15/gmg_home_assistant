@@ -17,7 +17,14 @@ from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import ATTR_GRILL_SET_TEMP, ATTR_GRILL_TEMP, ATTR_ON, DOMAIN
+from .const import (
+    ATTR_GRILL_SET_TEMP,
+    ATTR_GRILL_TEMP,
+    ATTR_ON,
+    DOMAIN,
+    POWER_STATE_COLD_SMOKE,
+    POWER_STATE_ON,
+)
 from .coordinator import GmgDataUpdateCoordinator
 from .entity import GmgEntity
 
@@ -58,10 +65,18 @@ class GmgGrillClimate(GmgEntity, ClimateEntity):
 
     @property
     def hvac_mode(self) -> HVACMode:
+        # Corrected 2026-08-28: the original implementation mapped state==2
+        # to FAN_ONLY/cold-smoke. Cross-checked against an independent
+        # reverse-engineering of this same protocol (with real captured
+        # payloads, not just a guess): cold smoke is confirmed as state==3.
+        # State==2 exists in that project's own enum as a distinct "fan"
+        # state, but neither project has a confirmed real example of it --
+        # it currently falls through to OFF here rather than being guessed
+        # at, same as any other genuinely unknown value.
         state = self.coordinator.data[ATTR_ON]
-        if state == 1:
+        if state == POWER_STATE_ON:
             return HVACMode.HEAT
-        if state == 2:
+        if state == POWER_STATE_COLD_SMOKE:
             return HVACMode.FAN_ONLY
         return HVACMode.OFF
 
