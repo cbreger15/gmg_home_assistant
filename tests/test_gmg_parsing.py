@@ -99,6 +99,48 @@ def test_short_response_raises_instead_of_hanging_or_crashing():
     assert raised, "a too-short response must raise, not crash on a raw IndexError or return partial state"
 
 
+def test_status_retries_a_short_response_then_succeeds():
+    """The regression this fork exists to fix: a short payload must be
+    retried, not raised on. Two short reads then a good one is a success."""
+    g = Grill("10.0.0.1", "TEST")
+    replies = [b"UR", b"URfoo", POWER_ON_COLD_SMOKE]
+    calls = []
+
+    def fake_send(message, timeout=1):
+        calls.append(message)
+        return replies[len(calls) - 1]
+
+    g.send = fake_send
+    state = g.status()
+    assert len(calls) == 3, "both short replies should have been retried"
+    assert state["on"] == 3
+    assert state["fireState"] == 198
+
+
+def test_status_gives_up_after_all_short_and_says_so():
+    """It must still fail eventually, and the message must name the length --
+    a grill returning a CONSISTENT short payload is a protocol difference,
+    not a blip, and the error is the only place that would show it."""
+    g = Grill("10.0.0.1", "TEST")
+    calls = []
+
+    def fake_send(message, timeout=1):
+        calls.append(message)
+        return b"UR" + b"x" * 20          # 22 bytes -- a real observed length
+
+    g.send = fake_send
+    try:
+        g.status()
+        raised = None
+    except GmgCommunicationError as err:
+        raised = str(err)
+    assert raised is not None, "all-short must still raise"
+    assert "22 bytes" in raised, f"the error should name the length, got: {raised}"
+    assert len(calls) == _const.MAX_STATUS_RETRIES, (
+        f"should have spent every retry, spent {len(calls)}"
+    )
+
+
 def test_combine_temp_matches_hand_computation():
     # Spot checks independent of the fixtures above -- e.g. a value that
     # genuinely needs the high byte (can't fit in one byte alone), proving
@@ -181,6 +223,8 @@ if __name__ == "__main__":
         test_set_temp_rejects_out_of_range,
         test_firmware_command_and_parsing,
         test_is_probe_connected_boundaries,
+        test_status_retries_a_short_response_then_succeeds,
+        test_status_gives_up_after_all_short_and_says_so,
     ]
     for t in tests:
         t()

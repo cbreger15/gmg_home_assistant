@@ -53,6 +53,16 @@ MAX_TEMP_F_PROBE = 257
 
 MAX_STATUS_RETRIES = 5
 
+# The shortest status payload _parse_status can read. It indexes values[33]
+# (fireStatePercentage), so anything under 34 bytes cannot be parsed at all.
+#
+# This is not hypothetical: a real grill on a real network returns short
+# payloads intermittently -- 18, 22, 28, 29 and 31 bytes were all observed on
+# one install over 25 hours, 112 times. The datagram is atomic (UDP), the
+# receive buffer is 1024, and the parser is correct; the grill really does
+# send them. Treat a short response the same way as no response and retry.
+MIN_STATUS_BYTES = 34
+
 # A probe jack with nothing plugged in reports a combined value of 601 --
 # confirmed against two independent real captured payloads (both probes,
 # both power states, both showing exactly 601; see

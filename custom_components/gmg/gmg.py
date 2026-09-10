@@ -28,6 +28,7 @@ import socket
 
 from .const import (
     MAX_STATUS_RETRIES,
+    MIN_STATUS_BYTES,
     MAX_TEMP_F,
     MAX_TEMP_F_PROBE,
     MIN_TEMP_F,
@@ -142,20 +143,55 @@ class Grill:
         Retries up to MAX_STATUS_RETRIES times, then raises
         GmgCommunicationError -- callers must not treat a missing response
         as success, unlike the original implementation.
-        """
-        response = None
-        attempts = 0
 
-        while response is None and attempts < MAX_STATUS_RETRIES:
+        A SHORT RESPONSE IS RETRIED THE SAME WAY A MISSING ONE IS, and that
+        is the whole point of this loop's shape. The previous version guarded
+        on `response is None`, which is only true on a socket timeout. A
+        truncated payload is not None -- it is a perfectly good `bytes` object
+        that happens to be too short to parse -- so it fell straight through
+        to _parse_status, raised, and took every entity for the grill
+        unavailable until the next poll.
+
+        Five retries were configured and none of them could ever be spent on
+        the failure that actually happens. Measured on one install: 112 of
+        these in 25 hours, each costing a full DEFAULT_SCAN_INTERVAL (30s) of
+        unavailability, recovering on its own every time.
+        """
+        attempts = 0
+        last_short = None
+
+        while attempts < MAX_STATUS_RETRIES:
             response = self.send(CODE_STATUS)
             attempts += 1
 
-        if response is None:
-            raise GmgCommunicationError(
-                f"No response from grill {self._ip} after {MAX_STATUS_RETRIES} attempts"
+            if response is None:
+                continue
+
+            if len(response) >= MIN_STATUS_BYTES:
+                return self._parse_status(response)
+
+            # Long enough to arrive, too short to read. Worth a debug line
+            # rather than silence: if a grill ever returns a CONSISTENT short
+            # length, that is a protocol difference to investigate, not a
+            # blip to retry past.
+            last_short = response
+            _LOGGER.debug(
+                "Short status response from grill %s (%d bytes, need %d), retrying",
+                self._ip,
+                len(response),
+                MIN_STATUS_BYTES,
             )
 
-        return self._parse_status(response)
+        if last_short is not None:
+            raise GmgCommunicationError(
+                f"Grill {self._ip} returned only short status responses in "
+                f"{MAX_STATUS_RETRIES} attempts; last was {len(last_short)} "
+                f"bytes, need {MIN_STATUS_BYTES}: {last_short!r}"
+            )
+
+        raise GmgCommunicationError(
+            f"No response from grill {self._ip} after {MAX_STATUS_RETRIES} attempts"
+        )
 
     def serial(self) -> str:
         """Fetch the grill's serial number over the network."""
