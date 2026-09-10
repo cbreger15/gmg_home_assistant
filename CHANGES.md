@@ -5,6 +5,33 @@ while unblocking it for a current Home Assistant install, not assumed --
 see gmg.py's module docstring for the specifics on what's provably a bug
 versus what's preserved on purpose.
 
+## Fixed in 3.1.2
+
+- **A short status response is now retried instead of raising.** `status()`
+  looped `while response is None`, which is only true on a socket timeout. A
+  truncated payload is not `None` -- it is a perfectly good `bytes` object that
+  happens to be too short to parse -- so it fell through to `_parse_status`,
+  raised `GmgCommunicationError`, and took every entity for the grill
+  unavailable until the next poll.
+
+  **Five retries were configured and none of them could ever be spent on the
+  failure that actually happens.** Measured on one install: 112 short responses
+  in 25 hours (18, 22, 28, 29 and 31 bytes observed), each costing a full
+  30-second scan interval of unavailability and recovering on its own every
+  time.
+
+  Ruled out while diagnosing, so nobody re-checks them: not the receive buffer
+  (`recvfrom(1024)` against a 34-byte need), not a partial read (UDP datagrams
+  are atomic -- the grill really does send short payloads), and not the parser
+  (it correctly needs index 33 and correctly refuses to guess when it is
+  absent; its `IndexError` handler was doing its job, the caller was not).
+
+  This does not explain *why* a grill truncates -- that is firmware and not
+  visible from the client -- but a fault that recovers within one retry should
+  not take every entity down for thirty seconds. `MIN_STATUS_BYTES = 34` is now
+  explicit, an all-short failure names the length it saw, and both behaviours
+  are covered by tests.
+
 ## Added in 3.1.0
 
 - **Firmware version.** `UN!` ("get grill firmware") is in the reference
