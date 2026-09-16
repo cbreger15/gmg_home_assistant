@@ -45,6 +45,7 @@ except ImportError:
 try:
     from tests.grill_wire import (
         APP_CALIBRATED,
+        APP_CALIBRATED_ALL,
         LIVE,
         LIVE_REPLY,
         MERGED_104,
@@ -57,6 +58,7 @@ try:
 except ImportError:  # run directly: tests/ itself is on sys.path
     from grill_wire import (
         APP_CALIBRATED,
+        APP_CALIBRATED_ALL,
         LIVE,
         LIVE_REPLY,
         MERGED_104,
@@ -95,7 +97,7 @@ def test_config_block_is_read_from_a_whole_reply():
     assert config.climate == 2
     assert config.auto_revert_wifi is False
     assert config.lock_temp_display is True
-    # Calibration boxes, raw: not decoded (see gmg.py).
+    # Calibration boxes as stored: every box at 0.
     assert config.grill_adjustment_raw == (20, 50)
     assert config.probe1_adjustment_raw == (25, 25)
     assert config.probe2_adjustment_raw == (25, 25)
@@ -137,12 +139,36 @@ def test_calibration_bytes_read_as_the_app_set_them():
     assert config.probe2_adjustment_raw == (25 + 4, 25)
 
 
+def test_calibration_boxes_read_as_the_app_shows_them():
+    # (150F box, 500F box) for the grill; (32F box, 212F box) for each probe.
+    shipped = Grill._parse_status(LIVE["09"])["config"]
+    assert shipped.grill_adjustment == (0, 0)
+    assert shipped.probe1_adjustment == (0, 0)
+    assert shipped.probe2_adjustment == (0, 0)
+
+    set_in_app = Grill._parse_status(APP_CALIBRATED)["config"]  # +2/0, +8/0, +4/0
+    assert set_in_app.grill_adjustment == (2, 0)
+    assert set_in_app.probe1_adjustment == (8, 0)
+    assert set_in_app.probe2_adjustment == (4, 0)
+
+    # Every box different, right boxes and negatives included. The app showed
+    # -2/+5, -8/-3 and -4/+6; the grill stored 18 55 17 22 21 31.
+    all_six = Grill._parse_status(APP_CALIBRATED_ALL)["config"]
+    assert str(all_six) == "06 09 12 37 11 16 15 1f"
+    assert all_six.grill_adjustment_raw + all_six.probe1_adjustment_raw + all_six.probe2_adjustment_raw == (
+        18, 55, 17, 22, 21, 31,
+    )
+    assert all_six.grill_adjustment == (-2, 5)
+    assert all_six.probe1_adjustment == (-8, -3)
+    assert all_six.probe2_adjustment == (-4, 6)
+
+
 def test_an_empty_probe_jack_still_reads_disconnected_once_calibrated():
     # The grill shifts the 601 "nothing plugged in" reading by the calibration.
-    state = Grill._parse_status(APP_CALIBRATED)
-    assert (state["probe1_temp"], state["probe2_temp"]) == (584, 593)
-    assert _const.is_probe_connected(584) is False
-    assert _const.is_probe_connected(593) is False
+    for packet, readings in ((APP_CALIBRATED, (584, 593)), (APP_CALIBRATED_ALL, (608, 628))):
+        state = Grill._parse_status(packet)
+        assert (state["probe1_temp"], state["probe2_temp"]) == readings
+        assert not any(_const.is_probe_connected(value) for value in readings)
 
 
 def test_no_config_block_unless_the_reply_is_exactly_one_whole_packet():

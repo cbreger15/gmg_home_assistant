@@ -21,15 +21,30 @@ versus what's preserved on purpose.
   byte after the `0x21` landed. So Icy with Pizza Mode on works now. So does
   any change made while a calibration byte reads 33 -- 3.2.0 refused every
   change on this grill once that box was set.
-- **The calibration encoding is confirmed for the left boxes.** With the app
-  showing +2 / +8 / +4 in the grill's 150F box and the probes' 32F boxes,
-  bytes 10, 12 and 14 read 22 / 33 / 29: 20 or 25 plus the adjustment. The
-  right boxes, at 0, read 50 / 25 / 25. The bytes stay raw in Config Block
-  until negative values and the right boxes have been seen moving.
-- **An empty probe jack doesn't always read 601.** The grill applies the
-  probe calibration to that reading too: with +8 and +4 set, the two empty
-  jacks read 584 and 593. Both still count as disconnected, because the
-  check is a range, not the number 601.
+- **The calibration boxes are decoded.** Config Block now shows each box as
+  the app does (`grill_adjustment_150f`, `grill_adjustment_500f`,
+  `probe_1_adjustment_32f`, `probe_1_adjustment_212f`,
+  `probe_2_adjustment_32f`, `probe_2_adjustment_212f`), next to the stored
+  bytes (`..._raw`). Bytes 10-15 hold the grill's 150F and 500F boxes, then
+  each probe's 32F and 212F boxes. Each is stored as 20, 50, 25, 25, 25, 25
+  plus the value shown -- worked out on 16 Sep 2026 in two app changes:
+
+  | App (left / right) | Stored bytes 10-15 |
+  | --- | --- |
+  | all 0 | `20 50 25 25 25 25` |
+  | grill +2 / 0, probe 1 +8 / 0, probe 2 +4 / 0 | `22 50 33 25 29 25` |
+  | grill -2 / +5, probe 1 -8 / -3, probe 2 -4 / +6 | `18 55 17 22 21 31` |
+
+  The boxes are still read only. The app's limit for each box wasn't
+  recorded; the zero points suggest +/-20 (grill 150F), +/-50 (grill 500F)
+  and +/-25 (probes).
+- **An empty probe jack doesn't always read 601.** The grill applies each
+  probe's calibration as a straight line through its two boxes, extended
+  beyond them, and that includes the "nothing plugged in" reading. With the
+  settings above, the empty jacks read 584 / 593, then 608 / 628. All of
+  them still count as disconnected, because the check is a range (32-257F),
+  not the number 601. Even +/-25 in opposite boxes would only move it to
+  roughly 468-734.
 
 ## Added in 3.2.0 -- the Grill Config screen, from Home Assistant
 
@@ -325,9 +340,8 @@ this project's own original testing notes, not the wire protocol.
 - The GMG app writes all eight bytes from its own Grill Config screen too.
   Pressing Confirm on a screen opened before a change made from Home
   Assistant puts the old value back; reopen the screen first.
-- Bytes 10-15 (the calibration boxes) are exposed raw and never written. The
-  left boxes' encoding is confirmed (3.2.1); negative values and the right
-  boxes have not been seen moving.
+- The calibration boxes (bytes 10-15) are decoded (3.2.1), but they are read
+  only, and the app's limit for each box hasn't been recorded.
 - Whatever's in the currently-undecoded bytes (see Raw Status sensor,
   added 2.1.0) hasn't been identified. It's observable now, not decoded.
 - `PowerState == 2` ("fan," per the reference project's own enum) has no

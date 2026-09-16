@@ -90,6 +90,11 @@ def is_full_status_reply(raw: bytes) -> bool:
 # eight back at once (see Grill.write_config_field), so they are kept together.
 CONFIG_BLOCK = slice(8, 16)
 
+# Status bytes 10-15 each hold one calibration box as this number plus the
+# value the app shows: the grill's 150F and 500F boxes, then each probe's 32F
+# and 212F boxes (see GrillConfig).
+CALIBRATION_ZERO = (20, 50, 25, 25, 25, 25)
+
 
 @dataclass(frozen=True)
 class ConfigField:
@@ -147,12 +152,12 @@ class GrillConfig:
 
     Bytes 10-15 are the app's temperature calibration boxes, a left and a
     right box per adjustment: the grill's apply at 150F and 500F, each food
-    probe's at 32F and 212F (per GMG's support pages). On 16 Sep 2026 the app
-    set the three left boxes to +2 / +8 / +4 and bytes 10, 12 and 14 read
-    22 / 33 / 29, so a left box is stored as 20 (grill) or 25 (probe) plus the
-    adjustment; the right boxes, at 0, read 50 / 25 / 25. Negative values and
-    non-zero right boxes have not been seen, so these stay raw and are never
-    written.
+    probe's at 32F and 212F (per GMG's support pages). Each is stored as
+    CALIBRATION_ZERO plus the value the app shows. Decoded on 16 Sep 2026: the
+    app set -2 / +5, -8 / -3 and -4 / +6 and the bytes read 18 55 17 22 21 31
+    (and +2 / +8 / +4 on the left boxes read 22 / 33 / 29). The grill applies
+    each pair as a straight line through its two points, extended beyond
+    them. The boxes are read, never written.
     """
 
     block: bytes
@@ -198,6 +203,27 @@ class GrillConfig:
     @property
     def lock_temp_display(self) -> bool:
         return bool(self.get(LOCK_TEMP_DISPLAY))
+
+    def _adjustment(self, index: int) -> tuple[int, int]:
+        return (
+            self.block[index] - CALIBRATION_ZERO[index - 2],
+            self.block[index + 1] - CALIBRATION_ZERO[index - 1],
+        )
+
+    @property
+    def grill_adjustment(self) -> tuple[int, int]:
+        """The grill's 150F and 500F boxes, as the app shows them."""
+        return self._adjustment(2)
+
+    @property
+    def probe1_adjustment(self) -> tuple[int, int]:
+        """Probe 1's 32F and 212F boxes, as the app shows them."""
+        return self._adjustment(4)
+
+    @property
+    def probe2_adjustment(self) -> tuple[int, int]:
+        """Probe 2's 32F and 212F boxes, as the app shows them."""
+        return self._adjustment(6)
 
     @property
     def grill_adjustment_raw(self) -> tuple[int, int]:
