@@ -5,6 +5,25 @@ while unblocking it for a current Home Assistant install, not assumed --
 see gmg.py's module docstring for the specifics on what's provably a bug
 versus what's preserved on purpose.
 
+## Added to the docs after 3.3.0 -- an alert when the fire won't light
+
+The integration itself is unchanged from 3.3.0.
+
+[docs/automations.md](docs/automations.md) has a fifth automation, **Fire
+not lighting**. It sends a critical alert when the grill has been trying to
+light (`preheating`) for 30 minutes and is still below 130F. It only alerts,
+and the grill keeps trying.
+
+- **What it covers:** what 3.3.0's flameout check most likely can't. While
+  on, the grill only ever reported its fire as starting up or running. A cook
+  that fell to 150F went back to starting up, to relight. A fire that dies
+  mid-cook most likely looks like that, and so does an ignition that fails.
+- **Why 30 minutes:** the four cold starts in the log (6-16 Sep 2026)
+  reached running in 11 to 20 minutes.
+- **Why below 130F:** one mid-cook return to startup lasted 72 minutes, at
+  147-150F.
+- **A failed poll** starts the 30 minutes again.
+
 ## Added in 3.3.0 -- what the fire is doing, and when the food will be done
 
 Home Assistant recorded 11,569 status replies from this Jim Bowie between 6

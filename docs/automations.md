@@ -1,13 +1,14 @@
 # Cooking automations
 
-Four automations for a long cook, ready to paste into `automations.yaml`:
+Five automations for a long cook, ready to paste into `automations.yaml`:
 
 1. **Stall monitor** -- tells you when the brisket has plateaued and is ready to wrap.
 2. **Hold, then shut down** -- when probe 1 reaches its target, holds at 150°F for 45 minutes, then turns the grill off unless someone has taken over.
-3. **Flameout** -- turns the grill off if it has reported no fire for a minute while set to heat and below 130°F. A real flameout may never look like that; see [what these can and cannot do](#what-these-can-and-cannot-do).
+3. **Flameout** -- turns the grill off if it has reported no fire for a minute while set to heat and below 130°F. A real flameout more likely shows as the grill trying to relight, which number 5 watches for; see [what these can and cannot do](#what-these-can-and-cannot-do).
 4. **Possible grease fire** -- turns the grill off and sends a critical alert on a sudden temperature spike above 400°F.
+5. **Fire not lighting** -- sends a critical alert when the grill has been trying to light for 30 minutes and is still below 130°F: an ignition that failed, or a relight after a flameout that isn't taking. It only alerts, and the grill keeps trying.
 
-Every shutdown is checked. If the grill doesn't read as off within 90 seconds, the automation sends the command again and tells you.
+Every shutdown (numbers 2 to 4) is checked. If the grill doesn't read as off within 90 seconds, the automation sends the command again and tells you.
 
 **Every temperature here is in °F.** The automations assume Home Assistant's unit system is US customary (**Settings → System → General**). On a metric system, Home Assistant reads and sets the grill in °C, so every number below is wrong. The hold alone would set the grill to 150°C (302°F).
 
@@ -451,6 +452,44 @@ The stall monitor needs probe 1's rate of rise in °F per hour. Create it once:
                   critical: 1
                   volume: 1.0
               tag: gmg_grease_fire
+
+# 5. FIRE NOT LIGHTING
+- id: gmg_fire_not_lighting
+  alias: "GMG: Fire not lighting"
+  description: >-
+    The grill has been trying to light for 30 minutes and is still below
+    130°F: an ignition that failed at startup, or a relight after a flameout
+    that isn't taking. It only alerts; the grill keeps trying.
+  mode: single
+  triggers:
+    - trigger: template
+      value_template: >-
+        {{ is_state_attr('climate.green_mountain_grill_gmg12272191', 'hvac_action', 'preheating')
+           and state_attr('climate.green_mountain_grill_gmg12272191', 'current_temperature') | float(999) < 130 }}
+      for: "00:30:00"
+  actions:
+    - action: logbook.log
+      data:
+        name: GMG smoker
+        entity_id: climate.green_mountain_grill_gmg12272191
+        message: >-
+          still trying to light after 30 minutes, at
+          {{ state_attr('climate.green_mountain_grill_gmg12272191', 'current_temperature') }}°F
+    - action: notify.mobile_app_chris_iphone
+      data:
+        title: "GMG ALARM: the fire isn't lighting"
+        message: >-
+          The grill has been trying to light for 30 minutes and is only at
+          {{ state_attr('climate.green_mountain_grill_gmg12272191', 'current_temperature') }}°F.
+          Check the fire. If it's out, turn the grill off and let it cool,
+          and clear the firepot before relighting.
+        data:
+          push:
+            sound:
+              name: default
+              critical: 1
+              volume: 1.0
+          tag: gmg_fire_not_lighting
 ```
 
 ## What these can and cannot do
@@ -471,6 +510,12 @@ The stall monitor needs probe 1's rate of rise in °F per hour. Create it once:
   - In 11,569 replies from five cooks, a grill that was on always reported its fire as starting up or running. When a cook fell to 150°F or below, the grill went back to starting up, and Fire Active counts that as burning.
   - A fire that dies mid-cook most likely shows as the grill trying to relight. This automation acts only if the grill then reports no fire while still on, which has never been seen.
   - What the grill reports when it gives up (display code `FAL`) is unknown. If it reports itself as off, this automation stays quiet.
+  - The fire-not-lighting alert watches for a relight that isn't taking.
+- **The fire-not-lighting alert only alerts.** The grill keeps trying to light until you step in.
+  - **Why 30 minutes:** the four cold starts in the log reached running in 11 to 20 minutes. If your grill takes longer to light on a cold day, raise the 30 minutes.
+  - **Why below 130°F:** one mid-cook return to startup in the log lasted 72 minutes, at 147-150°F. The limit keeps a long recovery like that from counting.
+  - **A failed poll starts the 30 minutes again**, so the alert can come later than that.
+  - **After a restart:** if Home Assistant starts while the grill is already trying to light below 130°F, this alert stays quiet for that attempt.
 - **The hold runs once per cook.** If someone takes over, or the grill doesn't take the 150°F setpoint, the automation keeps running until the grill is turned off, for up to 12 hours. A failed poll or a replugged probe therefore can't start a second hold.
   - To hold again sooner, turn the automation off and on (which ends that wait), then run it.
   - If the grill can't be read at the end of the hold, the automation waits up to 10 minutes for it before leaving it on and telling you.

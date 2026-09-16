@@ -106,8 +106,13 @@ async def calls(hass: HomeAssistant) -> Calls:
     return made
 
 
-def _grill(hass: HomeAssistant, mode: str, now: float, setpoint: float = 225) -> None:
-    hass.states.async_set(GRILL, mode, {"current_temperature": now, "temperature": setpoint})
+def _grill(
+    hass: HomeAssistant, mode: str, now: float, setpoint: float = 225, action: str | None = None
+) -> None:
+    attributes = {"current_temperature": now, "temperature": setpoint}
+    if action:
+        attributes["hvac_action"] = action
+    hass.states.async_set(GRILL, mode, attributes)
 
 
 def _cooking(hass: HomeAssistant, probe: str = "190") -> None:
@@ -160,10 +165,16 @@ async def _meanwhile(hass: HomeAssistant, freezer, **delta) -> None:
     await _let_run(hass)
 
 
-async def test_all_four_load(hass: HomeAssistant, calls: Calls) -> None:
+async def test_all_five_load(hass: HomeAssistant, calls: Calls) -> None:
     await _load(hass)
     ids = {state.attributes.get("id") for state in hass.states.async_all("automation")}
-    assert ids == {"gmg_brisket_stall", "gmg_probe_1_hold_then_shutdown", "gmg_flameout", "gmg_grease_fire"}
+    assert ids == {
+        "gmg_brisket_stall",
+        "gmg_probe_1_hold_then_shutdown",
+        "gmg_flameout",
+        "gmg_grease_fire",
+        "gmg_fire_not_lighting",
+    }
     assert all(state.state == "on" for state in hass.states.async_all("automation"))
 
 
@@ -665,6 +676,115 @@ async def test_the_grill_appearing_or_dropping_out_is_not_a_grease_fire(
 
     assert calls["turn_off"] == []
     assert _problems(caplog) == []
+
+
+# 5. Fire not lighting
+
+
+async def test_a_fire_that_wont_light_is_reported(
+    hass: HomeAssistant, calls: Calls, freezer, caplog: pytest.LogCaptureFixture
+) -> None:
+    hass.states.async_set(RATE, "12")
+    _grill(hass, "off", 70, action="off")
+    await _load(hass)
+
+    _grill(hass, "heat", 70, action="preheating")  # switched on; the fire never takes
+    for temperature in (71, 72, 72, 73):
+        await _later(hass, freezer, minutes=7)
+        _grill(hass, "heat", temperature, action="preheating")
+    await _later(hass, freezer, minutes=1)
+    assert calls["notify"] == [], "not before 30 minutes"
+    await _later(hass, freezer, minutes=1, seconds=1)
+
+    alarm = calls["notify"][0].data
+    assert alarm["title"] == "GMG ALARM: the fire isn't lighting"
+    assert _text(alarm["message"]) == (
+        "The grill has been trying to light for 30 minutes and is only at 73°F. "
+        "Check the fire. If it's out, turn the grill off and let it cool, "
+        "and clear the firepot before relighting."
+    )
+    assert alarm["data"]["push"]["sound"]["critical"] == 1
+    assert calls["turn_off"] == [], "an alert only"
+    assert calls["log"][-1].data["message"] == "still trying to light after 30 minutes, at 73°F"
+    assert _problems(caplog) == []
+
+
+async def test_a_relight_that_isnt_taking_is_reported(hass: HomeAssistant, calls: Calls, freezer) -> None:
+    _grill(hass, "heat", 225, action="heating")
+    await _load(hass)
+
+    _grill(hass, "heat", 150, action="preheating")  # the fire died; the grill tries to relight
+    await _later(hass, freezer, minutes=10)
+    _grill(hass, "heat", 131, action="preheating")
+    await _later(hass, freezer, minutes=10)
+    _grill(hass, "heat", 129, action="preheating")  # below 130F from here
+    await _later(hass, freezer, minutes=15)
+    _grill(hass, "heat", 118, action="preheating")
+    await _later(hass, freezer, minutes=14)
+    assert calls["notify"] == [], "not before 30 minutes below 130F"
+    await _later(hass, freezer, minutes=1, seconds=1)
+
+    assert calls["notify"][0].data["title"] == "GMG ALARM: the fire isn't lighting"
+    assert calls["turn_off"] == []
+
+
+async def test_a_slow_start_is_not_reported(hass: HomeAssistant, calls: Calls, freezer) -> None:
+    _grill(hass, "off", 60, action="off")
+    await _load(hass)
+
+    # Below 130F for 27 minutes: slower than any start in the log (11-20
+    # minutes to running), as on a cold day.
+    _grill(hass, "heat", 60, action="preheating")
+    for temperature in (75, 90, 105, 118, 129):
+        await _later(hass, freezer, minutes=5)
+        _grill(hass, "heat", temperature, action="preheating")
+    await _later(hass, freezer, minutes=2)
+    _grill(hass, "heat", 140, action="preheating")
+    await _later(hass, freezer, minutes=4)
+    _grill(hass, "heat", 151, action="heating")
+    await _later(hass, freezer, hours=1)
+
+    assert calls["notify"] == []
+
+
+async def test_a_long_return_to_startup_above_130_is_not_reported(
+    hass: HomeAssistant, calls: Calls, freezer
+) -> None:
+    _grill(hass, "heat", 225, action="heating")
+    await _load(hass)
+
+    _grill(hass, "heat", 147, action="preheating")  # as on 10 Sep: 72 minutes at 147-150F
+    await _later(hass, freezer, minutes=72)
+    _grill(hass, "heat", 150, action="heating")
+    await _later(hass, freezer, minutes=5)
+
+    assert calls["notify"] == []
+
+
+async def test_a_grill_heating_below_130_is_not_reported(hass: HomeAssistant, calls: Calls, freezer) -> None:
+    _grill(hass, "heat", 225, action="heating")
+    await _load(hass)
+
+    _grill(hass, "heat", 125, action="heating")  # the lid is open; the fire still burns
+    await _later(hass, freezer, minutes=40)
+
+    assert calls["notify"] == []
+
+
+async def test_a_failed_poll_starts_the_30_minutes_again(hass: HomeAssistant, calls: Calls, freezer) -> None:
+    _grill(hass, "off", 70, action="off")
+    await _load(hass)
+
+    _grill(hass, "heat", 70, action="preheating")
+    await _later(hass, freezer, minutes=20)
+    hass.states.async_set(GRILL, "unavailable")
+    await _later(hass, freezer, seconds=30)
+    _grill(hass, "heat", 71, action="preheating")
+    await _later(hass, freezer, minutes=29)
+    assert calls["notify"] == [], "counted again from the failed poll"
+    await _later(hass, freezer, minutes=1, seconds=1)
+
+    assert len(calls["notify"]) == 1
 
 
 # The finish-time snippet
