@@ -5,6 +5,100 @@ while unblocking it for a current Home Assistant install, not assumed --
 see gmg.py's module docstring for the specifics on what's provably a bug
 versus what's preserved on purpose.
 
+## Added in 3.3.0 -- what the fire is doing, and when the food will be done
+
+Home Assistant recorded 11,569 status replies from this Jim Bowie between 6
+and 16 Sep 2026, covering five cooks. The power (byte 30) and fire (byte 32)
+states in them:
+
+| Power | Fire | Replies | Grill temp | Meaning |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | 10,774 | 51-192F | off |
+| 1 | 2 | 207 | 69-150F | startup: lighting from ambient; it also came back mid-cook, always at 150F or below |
+| 1 | 3 | 466 | 150-551F | running |
+| 2 | 4 | 122 | 174-484F | cooldown: every power-off went here for about 16 minutes before off |
+
+Fire states 2, 3 and 4 and power state 2 were unconfirmed until now.
+Byte 33 (fire state percentage) counts 25, 50, 75 through startup and reads
+100 while running.
+
+- **Fire Active** (`binary_sensor.*_fire_active`) is on while the fire state
+  is startup (2) or running (3).
+- **Cooldown Fan** (`binary_sensor.*_cooldown_fan`) is on while the power
+  state is 2 or the fire state is 4.
+- Both are diagnostic. Home Assistant's HomeKit bridge skips diagnostic
+  entities; otherwise it would publish these as occupancy sensors, which is
+  what it does with a binary sensor that has no type it knows.
+- **The climate entity shows what the grill is doing** (`hvac_action`):
+  - `preheating` in startup;
+  - `heating` while running;
+  - `fan` in the cooldown or cold smoke;
+  - `off` when off;
+  - `idle` when on with any other fire state.
+
+  The HomeKit bridge shows `fan` as Cooling, and `preheating` and `heating`
+  as Heating. A bridged grill now reads Cooling through the cooldown after
+  power-off and in cold smoke.
+- **Probe 1 Estimated Finish Time** is a timestamp sensor. It fits a
+  straight line to probe 1's readings from the last 20 minutes, projects it
+  to probe 1's target, and rounds to the minute.
+  - It's `unknown` with under 5 readings or under 5 minutes of them, once
+    the target is reached, and when reaching it would take more than 24
+    hours.
+  - It's also `unknown` unless the readings span at least 2F and the line
+    rises more than 1.5F across them. That rules out a stall, a fall, and a
+    rise under about 4.5F an hour. The grill reports whole degrees, and one
+    1F step fits as a rise of up to 1.46F anywhere in a full window, or past
+    1.5F when polls are lost. A rate threshold alone (2F an hour) isn't
+    enough: in simulated stalls it showed a finish on up to 75% of polls,
+    hours or days off.
+  - It's `unavailable` when the grill isn't on or in cold smoke, the probe is
+    unplugged or no target is set.
+  - Unplugging the probe, or the grill leaving on or cold smoke, starts the
+    line again, and so does the clock being set back. A failed poll adds
+    nothing: Home Assistant still notifies the entities, but with the
+    previous poll's reading.
+  - Its `rate_f_per_hour` attribute is the line's slope.
+- **Grill Config entities go unavailable 90 seconds after the last whole
+  reply.** Cut replies carry no settings, so 3.2 kept showing the last
+  whole reply's settings for as long as cut replies kept coming.
+  - Now two cut replies in a row still show them, and the third, 90 seconds
+    after the whole one, doesn't.
+  - The cut-off is 75 seconds, between polls, so a few milliseconds of
+    network delay can't decide the third.
+  - A write still reads the grill afresh.
+- **Turning the grill off sends `UK004!`**, the grill's own power-off, which
+  starts the cooldown above. That was already the case; a test now pins it.
+- **Cooking automations**, in [docs/automations.md](docs/automations.md): a
+  stall monitor (with a Derivative helper), hold-then-shut-down, flameout
+  and possible grease fire. They're YAML to paste into `automations.yaml`,
+  not part of the integration.
+  - Every shutdown is checked: if the grill doesn't read as off within 90
+    seconds, the automation sends the command again and says so.
+  - The hold runs once per cook, so a failed poll, which re-arms its
+    trigger, can't start another hold after someone has taken over.
+  - The flameout check may never fire. While on, the grill has only ever
+    reported its fire as starting up or running, and a cook that fell to
+    150F went back to starting up. That is most likely what a dying fire
+    looks like, and Fire Active counts it as burning.
+  - They need Home Assistant's US customary unit system.
+  - `tests/test_docs_automations.py` loads the YAML straight from that page
+    into Home Assistant and runs each one against simulated grill states,
+    so the page can't drift from what was tested.
+
+### Not added: auger, fan and igniter sensors
+
+These were planned for bits in bytes 4, 5 and 21. They aren't there:
+
+- Bytes 4-5 are probe 1's temperature, and change with it whether the grill
+  is on or off.
+- Byte 21 is part of the `ff ff ff ff` in bytes 20-23, and read 255 in all
+  11,569 replies.
+
+Within each of the four states above, no byte outside the decoded fields
+changed, so the reply has nowhere else to carry them. An auger duty-cycle
+sensor was dropped for the same reason.
+
 ## Fixed in 3.2.1 -- confirmed on a real grill
 
 - **The Grill Config write works.** On 16 Sep 2026, on a Jim Bowie

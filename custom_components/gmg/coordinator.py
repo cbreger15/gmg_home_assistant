@@ -10,15 +10,16 @@ gmg.Grill.status() runs in the executor instead of on the event loop.
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
-from .const import ATTR_CONFIG, DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import ATTR_CONFIG, CONFIG_MAX_AGE, DEFAULT_SCAN_INTERVAL, DOMAIN
 from .gmg import ConfigField, Grill, GmgCommunicationError
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ class GmgDataUpdateCoordinator(DataUpdateCoordinator):
         # before a write and finished after it would put the old settings
         # back on screen.
         self._grill_turn = asyncio.Lock()
+        self._config_seen: datetime | None = None  # when the last whole block arrived
         super().__init__(
             hass,
             _LOGGER,
@@ -52,10 +54,18 @@ class GmgDataUpdateCoordinator(DataUpdateCoordinator):
         # A cut or merged reply still has good status fields but no config
         # block (see const.STATUS_PACKET_BYTES). The settings did not change
         # because one reply was cut, so keep showing the last whole packet's
-        # block rather than dropping the Grill Config entities to
-        # unavailable. Display only: a write never uses this copy -- it reads
-        # the grill afresh (gmg.Grill.write_config_field).
-        if data[ATTR_CONFIG] is None and self.data is not None:
+        # block -- for up to CONFIG_MAX_AGE -- rather than dropping the Grill
+        # Config entities to unavailable. Display only: a write never uses
+        # this copy -- it reads the grill afresh
+        # (gmg.Grill.write_config_field).
+        now = dt_util.utcnow()
+        if data[ATTR_CONFIG] is not None:
+            self._config_seen = now
+        elif (
+            self.data is not None
+            and self._config_seen is not None
+            and now - self._config_seen <= CONFIG_MAX_AGE
+        ):
             data[ATTR_CONFIG] = self.data.get(ATTR_CONFIG)
         return data
 
@@ -76,6 +86,7 @@ class GmgDataUpdateCoordinator(DataUpdateCoordinator):
             except (GmgCommunicationError, ValueError) as err:
                 failure = err
             else:
+                self._config_seen = dt_util.utcnow()  # the confirming packet is whole
                 self.async_set_updated_data(status)
                 return
 

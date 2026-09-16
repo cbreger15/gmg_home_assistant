@@ -4,15 +4,20 @@ from __future__ import annotations
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    ATTR_FIRE_STATE,
+    ATTR_ON,
     ATTR_PROBE1_TEMP,
     ATTR_PROBE2_TEMP,
     ATTR_WARN_STATE,
     ATTR_WARNINGS,
     DOMAIN,
+    is_cooldown,
+    is_fire_active,
     is_probe_connected,
 )
 from .coordinator import GmgDataUpdateCoordinator
@@ -29,6 +34,8 @@ async def async_setup_entry(
             GmgProbeConnectedSensor(coordinator, probe_number=1, value_key=ATTR_PROBE1_TEMP),
             GmgProbeConnectedSensor(coordinator, probe_number=2, value_key=ATTR_PROBE2_TEMP),
             GmgWarningSensor(coordinator),
+            GmgFireActiveSensor(coordinator),
+            GmgCooldownFanSensor(coordinator),
         ]
     )
 
@@ -92,3 +99,42 @@ class GmgWarningSensor(GmgEntity, BinarySensorEntity):
             "warnings": self.coordinator.data.get(ATTR_WARNINGS, []),
             "raw_code": self.coordinator.data.get(ATTR_WARN_STATE),
         }
+
+
+# The two below are what the status reply says about the fire. It carries no
+# auger, fan or igniter bits (see const.is_fire_active). Both are diagnostic:
+# the HomeKit bridge would publish them as occupancy sensors otherwise.
+
+
+class GmgFireActiveSensor(GmgEntity, BinarySensorEntity):
+    """Whether pellets are burning: fire state (byte 32) starting up or running."""
+
+    _attr_name = "Fire Active"
+    _attr_icon = "mdi:fire"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.grill.serial_number}_fire_active"
+
+    @property
+    def is_on(self) -> bool | None:
+        return is_fire_active(self.coordinator.data.get(ATTR_FIRE_STATE))
+
+
+class GmgCooldownFanSensor(GmgEntity, BinarySensorEntity):
+    """Whether the grill is in its post-shutdown fan cooldown (about 16 minutes)."""
+
+    _attr_name = "Cooldown Fan"
+    _attr_icon = "mdi:fan"
+    _attr_device_class = BinarySensorDeviceClass.RUNNING
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.grill.serial_number}_cooldown_fan"
+
+    @property
+    def is_on(self) -> bool | None:
+        data = self.coordinator.data
+        return is_cooldown(data.get(ATTR_ON), data.get(ATTR_FIRE_STATE))

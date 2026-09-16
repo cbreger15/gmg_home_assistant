@@ -11,19 +11,29 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature, HVACMode
+from homeassistant.components.climate import (
+    ClimateEntity,
+    ClimateEntityFeature,
+    HVACAction,
+    HVACMode,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    ATTR_FIRE_STATE,
     ATTR_GRILL_SET_TEMP,
     ATTR_GRILL_TEMP,
     ATTR_ON,
     DOMAIN,
+    FIRE_STATE_RUNNING,
+    FIRE_STATE_STARTUP,
     POWER_STATE_COLD_SMOKE,
+    POWER_STATE_OFF,
     POWER_STATE_ON,
+    is_cooldown,
 )
 from .coordinator import GmgDataUpdateCoordinator
 from .entity import GmgEntity
@@ -69,16 +79,36 @@ class GmgGrillClimate(GmgEntity, ClimateEntity):
         # to FAN_ONLY/cold-smoke. Cross-checked against an independent
         # reverse-engineering of this same protocol (with real captured
         # payloads, not just a guess): cold smoke is confirmed as state==3.
-        # State==2 exists in that project's own enum as a distinct "fan"
-        # state, but neither project has a confirmed real example of it --
-        # it currently falls through to OFF here rather than being guessed
-        # at, same as any other genuinely unknown value.
+        # State==2 is the fan cooldown after power-off (confirmed by five
+        # real cooks): the grill is shutting down, so the mode is OFF and
+        # hvac_action says FAN.
         state = self.coordinator.data[ATTR_ON]
         if state == POWER_STATE_ON:
             return HVACMode.HEAT
         if state == POWER_STATE_COLD_SMOKE:
             return HVACMode.FAN_ONLY
         return HVACMode.OFF
+
+    @property
+    def hvac_action(self) -> HVACAction | None:
+        """What the grill is doing, from the power (byte 30) and fire (byte 32) states.
+
+        Fire state STARTUP has also come back mid-cook after the grill dropped
+        below temperature, so PREHEATING can reappear during a cook.
+        """
+        power = self.coordinator.data.get(ATTR_ON)
+        fire = self.coordinator.data.get(ATTR_FIRE_STATE)
+        if is_cooldown(power, fire) or power == POWER_STATE_COLD_SMOKE:
+            return HVACAction.FAN
+        if power == POWER_STATE_ON:
+            if fire == FIRE_STATE_STARTUP:
+                return HVACAction.PREHEATING
+            if fire == FIRE_STATE_RUNNING:
+                return HVACAction.HEATING
+            return HVACAction.IDLE
+        if power == POWER_STATE_OFF:
+            return HVACAction.OFF
+        return None
 
     @property
     def current_temperature(self) -> int | None:
