@@ -188,14 +188,25 @@ class GmgRawStatusSensor(GmgEntity, SensorEntity):
         }
 
 
+# Config Block attributes for status bytes 10-15, in order: each calibration
+# box as the app shows it, and (with "_raw") as the grill stores it.
+CALIBRATION_ATTRIBUTES = (
+    "grill_adjustment_150f",
+    "grill_adjustment_500f",
+    "probe_1_adjustment_32f",
+    "probe_1_adjustment_212f",
+    "probe_2_adjustment_32f",
+    "probe_2_adjustment_212f",
+)
+
+
 class GmgConfigBlockSensor(GmgConfigEntity, SensorEntity):
     """The Grill Config block (status bytes 8-15) as it last arrived whole.
 
     The instrument for decoding the rest of it: change one setting in the GMG
-    app, and whichever byte moves is that setting. The six calibration bytes
-    are attributes, raw -- which byte is which box, and where each box's zero
-    sits, is inferred rather than confirmed (see gmg.GrillConfig), and a
-    guessed zero point would turn a readout into a wrong one.
+    app, and whichever byte moves is that setting. The six calibration boxes
+    are attributes, as the app shows them and (with "_raw") as the grill
+    stores them -- see gmg.GrillConfig.
     """
 
     _attr_name = "Config Block"
@@ -216,15 +227,10 @@ class GmgConfigBlockSensor(GmgConfigEntity, SensorEntity):
         config = self.config
         if config is None:
             return None
-        grill_150f, grill_500f = config.grill_adjustment_raw
-        probe1_32f, probe1_212f = config.probe1_adjustment_raw
-        probe2_32f, probe2_212f = config.probe2_adjustment_raw
+        shown = config.grill_adjustment + config.probe1_adjustment + config.probe2_adjustment
+        raw = config.grill_adjustment_raw + config.probe1_adjustment_raw + config.probe2_adjustment_raw
         return {
             "api_version": config.api_version,
-            "grill_adjustment_150f_raw": grill_150f,
-            "grill_adjustment_500f_raw": grill_500f,
-            "probe_1_adjustment_32f_raw": probe1_32f,
-            "probe_1_adjustment_212f_raw": probe1_212f,
-            "probe_2_adjustment_32f_raw": probe2_32f,
-            "probe_2_adjustment_212f_raw": probe2_212f,
+            **dict(zip(CALIBRATION_ATTRIBUTES, shown)),
+            **{f"{name}_raw": value for name, value in zip(CALIBRATION_ATTRIBUTES, raw)},
         }

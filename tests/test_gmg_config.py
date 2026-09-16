@@ -44,6 +44,8 @@ except ImportError:
 
 try:
     from tests.grill_wire import (
+        APP_CALIBRATED,
+        APP_CALIBRATED_ALL,
         LIVE,
         LIVE_REPLY,
         MERGED_104,
@@ -55,6 +57,8 @@ try:
     )
 except ImportError:  # run directly: tests/ itself is on sys.path
     from grill_wire import (
+        APP_CALIBRATED,
+        APP_CALIBRATED_ALL,
         LIVE,
         LIVE_REPLY,
         MERGED_104,
@@ -93,7 +97,7 @@ def test_config_block_is_read_from_a_whole_reply():
     assert config.climate == 2
     assert config.auto_revert_wifi is False
     assert config.lock_temp_display is True
-    # Calibration boxes, raw: not decoded (see gmg.py).
+    # Calibration boxes as stored: every box at 0.
     assert config.grill_adjustment_raw == (20, 50)
     assert config.probe1_adjustment_raw == (25, 25)
     assert config.probe2_adjustment_raw == (25, 25)
@@ -122,6 +126,49 @@ def test_every_observed_byte_9_decodes_to_what_the_app_showed():
             lock_temp_display=config.lock_temp_display,
         )
         assert got == want, f"byte 9 = {byte9}: got {got}, want {want}"
+
+
+def test_calibration_bytes_read_as_the_app_set_them():
+    """The app showed +2 / 0, +8 / 0 and +4 / 0 when this packet was read:
+    each left box is its pair's first byte, stored as 20 or 25 plus the
+    adjustment, and each right box at 0 still reads 50 / 25 / 25."""
+    config = Grill._parse_status(APP_CALIBRATED)["config"]
+    assert str(config) == "06 09 16 32 21 19 1d 19"
+    assert config.grill_adjustment_raw == (20 + 2, 50)
+    assert config.probe1_adjustment_raw == (25 + 8, 25)
+    assert config.probe2_adjustment_raw == (25 + 4, 25)
+
+
+def test_calibration_boxes_read_as_the_app_shows_them():
+    # (150F box, 500F box) for the grill; (32F box, 212F box) for each probe.
+    shipped = Grill._parse_status(LIVE["09"])["config"]
+    assert shipped.grill_adjustment == (0, 0)
+    assert shipped.probe1_adjustment == (0, 0)
+    assert shipped.probe2_adjustment == (0, 0)
+
+    set_in_app = Grill._parse_status(APP_CALIBRATED)["config"]  # +2/0, +8/0, +4/0
+    assert set_in_app.grill_adjustment == (2, 0)
+    assert set_in_app.probe1_adjustment == (8, 0)
+    assert set_in_app.probe2_adjustment == (4, 0)
+
+    # Every box different, right boxes and negatives included. The app showed
+    # -2/+5, -8/-3 and -4/+6; the grill stored 18 55 17 22 21 31.
+    all_six = Grill._parse_status(APP_CALIBRATED_ALL)["config"]
+    assert str(all_six) == "06 09 12 37 11 16 15 1f"
+    assert all_six.grill_adjustment_raw + all_six.probe1_adjustment_raw + all_six.probe2_adjustment_raw == (
+        18, 55, 17, 22, 21, 31,
+    )
+    assert all_six.grill_adjustment == (-2, 5)
+    assert all_six.probe1_adjustment == (-8, -3)
+    assert all_six.probe2_adjustment == (-4, 6)
+
+
+def test_an_empty_probe_jack_still_reads_disconnected_once_calibrated():
+    # The grill shifts the 601 "nothing plugged in" reading by the calibration.
+    for packet, readings in ((APP_CALIBRATED, (584, 593)), (APP_CALIBRATED_ALL, (608, 628))):
+        state = Grill._parse_status(packet)
+        assert (state["probe1_temp"], state["probe2_temp"]) == readings
+        assert not any(_const.is_probe_connected(value) for value in readings)
 
 
 def test_no_config_block_unless_the_reply_is_exactly_one_whole_packet():
@@ -330,18 +377,24 @@ def test_write_refuses_a_value_the_app_does_not_offer_before_touching_the_networ
     assert wire.sent() == []
 
 
-def test_write_refuses_a_block_containing_the_command_terminator():
-    """Every command ends with "!" (0x21). Icy with Pizza Mode and Lock Temp
-    Display on and Auto-Revert WiFi off makes byte 9 exactly 0x21. Whether
-    the grill reads such a frame whole or stops at that byte is unknown, and
-    a cut-short write could scramble the calibration bytes -- so it is not
-    sent from here until that is known."""
+def test_a_block_containing_the_command_terminator_is_written_whole():
+    """Every command ends with "!" (0x21), and a block can contain that byte.
+    On 16 Sep 2026 the GMG app wrote 06 09 16 32 21 19 1d 19 and the grill
+    took all of it (APP_CALIBRATED), so such a frame is sent like any other."""
+    # Byte 12 is 0x21 (probe 1 at +8); turn Pizza Mode on around it.
+    wire = WireGrill(APP_CALIBRATED)
+    state = _grill_on(wire).write_config_field(PIZZA_MODE, 1)
+    assert wire.writes() == [bytes.fromhex("55430629163221191d1921")]
+    assert str(state["config"]) == "06 29 16 32 21 19 1d 19"
+
+    # Byte 9 becomes 0x21 itself: Icy, Pizza Mode and Lock Temp Display on,
+    # Auto-Revert WiFi off.
     packet = bytearray(LIVE["09"])
     packet[9] = 0x29  # Pizza Mode on, Average
     wire = WireGrill(bytes(packet))
-    err = _raises(GmgConfigWriteError, _grill_on(wire).write_config_field, CLIMATE, 0)
-    assert wire.writes() == []
-    assert "0x21" in str(err), f"the error should say why: {err}"
+    state = _grill_on(wire).write_config_field(CLIMATE, 0)
+    assert wire.writes() == [bytes.fromhex("5543062114321919191921")]
+    assert str(state["config"]) == "06 21 14 32 19 19 19 19"
 
 
 def test_write_fails_at_once_when_the_grill_reports_a_different_block():

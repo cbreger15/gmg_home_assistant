@@ -5,6 +5,47 @@ while unblocking it for a current Home Assistant install, not assumed --
 see gmg.py's module docstring for the specifics on what's provably a bug
 versus what's preserved on purpose.
 
+## Fixed in 3.2.1 -- confirmed on a real grill
+
+- **The Grill Config write works.** On 16 Sep 2026, on a Jim Bowie
+  (firmware 2.3, APIv6), Pizza Mode was turned on and off from Home
+  Assistant. The block went `06 09 14 32 19 19 19 19` -> `06 29 ...` -> back,
+  each change read back exactly and held through regular polling, and the
+  GMG app agreed afterwards with every calibration box untouched. The grill
+  sometimes answers a `UC` frame with a whole status packet that already
+  shows the new block.
+- **A block containing `0x21` is written like any other.** 3.2.0 refused
+  one, since `0x21` is the `!` that ends every command, and whether the grill
+  would stop reading there was unknown. It doesn't: the GMG app wrote
+  `06 09 16 32 21 19 1d 19` (probe 1's 32F box at +8, stored as 33) and every
+  byte after the `0x21` landed. So Icy with Pizza Mode on works now. So does
+  any change made while a calibration byte reads 33 -- 3.2.0 refused every
+  change on this grill once that box was set.
+- **The calibration boxes are decoded.** Config Block now shows each box as
+  the app does (`grill_adjustment_150f`, `grill_adjustment_500f`,
+  `probe_1_adjustment_32f`, `probe_1_adjustment_212f`,
+  `probe_2_adjustment_32f`, `probe_2_adjustment_212f`), next to the stored
+  bytes (`..._raw`). Bytes 10-15 hold the grill's 150F and 500F boxes, then
+  each probe's 32F and 212F boxes. Each is stored as 20, 50, 25, 25, 25, 25
+  plus the value shown -- worked out on 16 Sep 2026 in two app changes:
+
+  | App (left / right) | Stored bytes 10-15 |
+  | --- | --- |
+  | all 0 | `20 50 25 25 25 25` |
+  | grill +2 / 0, probe 1 +8 / 0, probe 2 +4 / 0 | `22 50 33 25 29 25` |
+  | grill -2 / +5, probe 1 -8 / -3, probe 2 -4 / +6 | `18 55 17 22 21 31` |
+
+  The boxes are still read only. The app's limit for each box wasn't
+  recorded; the zero points suggest +/-20 (grill 150F), +/-50 (grill 500F)
+  and +/-25 (probes).
+- **An empty probe jack doesn't always read 601.** The grill applies each
+  probe's calibration as a straight line through its two boxes, extended
+  beyond them, and that includes the "nothing plugged in" reading. With the
+  settings above, the empty jacks read 584 / 593, then 608 / 628. All of
+  them still count as disconnected, because the check is a range (32-257F),
+  not the number 601. Even +/-25 in opposite boxes would only move it to
+  roughly 468-734.
+
 ## Added in 3.2.0 -- the Grill Config screen, from Home Assistant
 
 The GMG app's Grill Config screen was in every status reply all along: bytes
@@ -41,7 +82,7 @@ and reading the reply back:
      the layout is confirmed on;
   3. changes that one field's bits, and does nothing if they already match;
   4. refuses a new block containing `0x21`, the `!` that ends every command
-     (see Known gaps);
+     (found unnecessary and dropped in 3.2.1);
   5. sends the frame **once** -- a write that did not land is reported, never
      repeated;
   6. reads the block back after 0.5 s, then every 2 s, 15 times in all. The
@@ -293,23 +334,14 @@ this project's own original testing notes, not the wire protocol.
 - `warnState`: only low pellets (128, bit 7) has been seen for real. The
   other seven flag names are an inference that one other source contradicts
   (see 3.2.0).
-- The `UC` config write is single-sourced (gmg-js, 2020). The byte layout
-  it writes is confirmed on APIv6 by reading; each write is confirmed only by
-  reading the block back afterwards, and it is refused on any other API
-  version.
-- A write whose new block contains `0x21` is refused. Every command ends with
-  `!` (`0x21`), and whether the grill reads such a frame whole has not been
-  seen. In practice that is Icy with Pizza Mode and Lock Temp Display on and
-  Auto-Revert WiFi off -- and every change at all while any calibration byte
-  reads 33 (probably +8 on a probe box, +13 or -17 on the grill's), since a
-  write sends all eight. Setting a probe box to +8 in the GMG app and reading
-  the block back would show whether the grill takes such a frame -- the app
-  has to send one to make that change.
+- The `UC` config write comes from one source (gmg-js, 2020) and has been
+  confirmed on one grill (a Jim Bowie on APIv6, 16 Sep 2026). It is refused
+  on any other API version, and every write is read back.
 - The GMG app writes all eight bytes from its own Grill Config screen too.
   Pressing Confirm on a screen opened before a change made from Home
   Assistant puts the old value back; reopen the screen first.
-- Bytes 10-15 (the calibration boxes) are exposed raw and never written: the
-  byte-to-box mapping and the zero points are inferred, not confirmed.
+- The calibration boxes (bytes 10-15) are decoded (3.2.1), but they are read
+  only, and the app's limit for each box hasn't been recorded.
 - Whatever's in the currently-undecoded bytes (see Raw Status sensor,
   added 2.1.0) hasn't been identified. It's observable now, not decoded.
 - `PowerState == 2` ("fan," per the reference project's own enum) has no

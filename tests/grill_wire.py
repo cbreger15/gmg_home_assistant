@@ -70,6 +70,25 @@ LIVE = {
     ),
 }
 
+# 16 Sep 15:07 UTC, after the GMG app set the three left calibration boxes to
+# +2 (grill, 150F), +8 (probe 1, 32F) and +4 (probe 2, 32F), right boxes 0.
+# Byte 12 is 0x21 -- the "!" that ends every command -- and the grill took the
+# app's write whole. The empty probe jacks read 584 and 593 instead of 601:
+# the grill applies its calibration to that reading too.
+APP_CALIBRATED = bytes.fromhex(
+    "55525000480296000609163221191d1951020000ffffffff00000000000000000100000300000000"
+    "004a42303253554630322e33"
+)
+
+# 16 Sep 15:25 UTC, after the app set all six boxes to distinct values:
+# grill -2 (150F) / +5 (500F), probe 1 -8 (32F) / -3 (212F), probe 2 -4 (32F)
+# / +6 (212F). The empty jacks read 608 and 628: the grill applies each probe's
+# calibration as a straight line through its two boxes, extended to 601.
+APP_CALIBRATED_ALL = bytes.fromhex(
+    "5552460060029600060912371116151f74020000ffffffff00000000000000000100000300000000"
+    "004a42303253554630322e33"
+)
+
 # Real pieces of a reply (13 Sep): one byte short of whole, and two whole
 # replies run together. Both start UR, so their status fields are readable,
 # but neither is exactly one packet -- and both carry an older block (0b).

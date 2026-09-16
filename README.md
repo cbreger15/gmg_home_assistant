@@ -29,7 +29,7 @@ One device per grill, with:
 - **Warning** (binary sensor) -- the grill's own warning state, with the active warnings listed in its `warnings` attribute (e.g. `low_pellet`)
 - **Pizza Mode** (switch) -- the Pizza Mode setting from the GMG app's Grill Config screen
 - **Climate Setting** (select: Icy / Cold / Average / Warm / Hot), **Auto-Revert WiFi** and **Lock Temp Display** (switches) -- the rest of the Grill Config screen, as configuration entities
-- **Config Block** (diagnostic sensor) -- the Grill Config block as hex, with the temperature calibration boxes as raw attributes
+- **Config Block** (diagnostic sensor) -- the Grill Config block as hex, with the temperature calibration boxes as attributes, as the app shows them (e.g. `probe_1_adjustment_32f: -8`)
 - **Fire state / Fire state percentage** (diagnostic sensors) -- fire state shows a friendly name (e.g. `off`, `cold_smoke`) where one is confirmed
 - **Raw Status** (diagnostic sensor, disabled by default) -- every byte of the last response, for anyone digging further into what the protocol has left undecoded
 - **Firmware version** -- shown on the device page (`sw_version`), fetched once at setup
@@ -44,9 +44,8 @@ Temperature readings above 255°F, and cold-smoke mode detection, were both fixe
 
 - Fire state's friendly names: only `off` and `cold_smoke` are independently confirmed; the rest are plausible, not certain (detail in CHANGES.md).
 - Warnings: only `low_pellet` has been confirmed against a real grill. The other warning names are a best reading of the sources and may be wrong.
-- The Grill Config write (`UC`) comes from a single 2020 source. Each write is checked by reading the settings back, but treat it as new.
-- The temperature calibration boxes are shown raw and can't be changed from Home Assistant yet.
-- A few setting combinations can't be written from Home Assistant yet, because one of the bytes would equal the `!` that ends every command (for example Icy with Pizza Mode on, Lock Temp Display on and Auto-Revert WiFi off). The toggle says so; use the GMG app for those.
+- The Grill Config write (`UC`) comes from a single 2020 source and has been confirmed on one grill, a Jim Bowie on APIv6 (September 2026). Each write is checked by reading the settings back.
+- The temperature calibration boxes are shown, but can't be changed from Home Assistant yet.
 - On grills that send the older, shorter status reply, the Grill Config entities stay unavailable.
 - The "probe connected" check is a heuristic (a probe reading outside its own physical range) -- there's no dedicated connected/disconnected flag in the protocol, but this is now a principled range check rather than a hardcoded magic number.
 - Cold-smoke mode is wired up and its status detection is now confirmed against real data, but the actual cooking behavior in that mode isn't extensively tested.

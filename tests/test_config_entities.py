@@ -29,6 +29,7 @@ from custom_components.gmg import gmg
 from custom_components.gmg.const import CONF_IP, CONF_SERIAL_NUMBER, CONFIG_READ_ATTEMPTS, DOMAIN
 from custom_components.gmg.gmg import Grill
 from tests.grill_wire import (
+    APP_CALIBRATED_ALL,
     LIVE,
     MERGED_104,
     STATUS,
@@ -107,6 +108,32 @@ async def test_the_controls_show_the_grill_settings(hass: HomeAssistant) -> None
     assert block.attributes["probe_1_adjustment_212f_raw"] == 25
     assert block.attributes["probe_2_adjustment_32f_raw"] == 25
     assert block.attributes["probe_2_adjustment_212f_raw"] == 25
+
+
+async def test_the_calibration_boxes_show_as_the_app_does(hass: HomeAssistant) -> None:
+    await _set_up(hass, WireGrill(APP_CALIBRATED_ALL))  # the app showed -2/+5, -8/-3, -4/+6
+
+    block = hass.states.get(BLOCK)
+    assert block.state == "06 09 12 37 11 16 15 1f"
+    assert {
+        name: block.attributes[name]
+        for name in (
+            "grill_adjustment_150f",
+            "grill_adjustment_500f",
+            "probe_1_adjustment_32f",
+            "probe_1_adjustment_212f",
+            "probe_2_adjustment_32f",
+            "probe_2_adjustment_212f",
+        )
+    } == {
+        "grill_adjustment_150f": -2,
+        "grill_adjustment_500f": 5,
+        "probe_1_adjustment_32f": -8,
+        "probe_1_adjustment_212f": -3,
+        "probe_2_adjustment_32f": -4,
+        "probe_2_adjustment_212f": 6,
+    }
+    assert block.attributes["grill_adjustment_500f_raw"] == 55
 
 
 async def test_only_pizza_mode_is_a_user_facing_control(hass: HomeAssistant) -> None:

@@ -144,9 +144,12 @@ CLIMATE_SETTINGS = ("Icy", "Cold", "Average", "Warm", "Hot")
 # against this project's own combining math in gmg.py). 601 is outside the
 # probe's real physical range (32-257F), so "outside the physical range"
 # is what's actually checked below, rather than hardcoding 601 as a magic
-# number -- there's no evidence the sentinel is always exactly 601 versus
-# some other always-out-of-range value, and a range check degrades safely
-# either way (anything implausible reads as disconnected).
+# number -- and the sentinel is NOT always exactly 601: the grill applies the
+# app's probe calibration to it too, as a straight line through the 32F and
+# 212F boxes extended out to 601. Seen on 16 Sep 2026: 584 / 593 and 608 / 628
+# for the empty jacks. Even +/-25 in opposite boxes only moves it to roughly
+# 468-734, far outside the range below, so the range check holds either way
+# (anything implausible reads as disconnected).
 
 
 def is_probe_connected(value: int | None) -> bool | None:
