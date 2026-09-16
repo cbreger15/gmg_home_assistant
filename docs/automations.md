@@ -516,10 +516,13 @@ The stall monitor needs probe 1's rate of rise in °F per hour. Create it once:
   - **Why below 130°F:** one mid-cook return to startup in the log lasted 72 minutes, at 147-150°F. The limit keeps a long recovery like that from counting.
   - **A failed poll starts the 30 minutes again**, so the alert can come later than that.
   - **After a restart:** if Home Assistant starts while the grill is already trying to light below 130°F, this alert stays quiet for that attempt.
-- **The hold runs once per cook.** If someone takes over, or the grill doesn't take the 150°F setpoint, the automation keeps running until the grill is turned off, for up to 12 hours. A failed poll or a replugged probe therefore can't start a second hold.
+- **The hold runs once per cook.** If someone takes over, or the grill doesn't take the 150°F setpoint, the automation keeps running until the grill is turned off, for up to 12 hours. A failed poll or a replugged probe therefore can't start a second hold, unless Home Assistant has restarted in between (see the next point).
   - To hold again sooner, turn the automation off and on (which ends that wait), then run it.
   - If the grill can't be read at the end of the hold, the automation waits up to 10 minutes for it before leaving it on and telling you.
-- **A restart cancels whatever an automation is waiting for.** If Home Assistant restarts during the 45-minute hold, the grill stays at 150°F until you turn it off. If it restarts during a shutdown check, there's no retry.
+- **Don't restart Home Assistant while the grill is cooking.** A restart cancels whatever an automation is waiting for, and the hold forgets that it has run.
+  - If probe 1 still reads at or above its target, the next failed poll starts the hold again. It sets the grill to 150°F, even if you had taken over, and turns it off 45 minutes later unless you change the setpoint. Failed polls happen often, so expect this within an hour or two of the restart.
+  - That includes a restart during the 45-minute hold: the hold starts over. If probe 1 has cooled below its target by then, nothing turns the grill off, and it stays at 150°F until you do.
+  - After a restart during a shutdown check, there's no retry.
 - **The stall alert comes at most once every 4 hours.** The rate helper drops out whenever a poll fails, and without the limit each dropout during a stall would bring another alert.
 - **The grill cannot report what its auger, fan or igniter are doing.** Its status reply has no bits for them, so none of these automations can use them.
 - **Probe 1 Estimated Finish Time** projects the last 20 minutes of probe 1 readings to its target. It is:
