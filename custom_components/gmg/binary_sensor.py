@@ -7,7 +7,14 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import ATTR_PROBE1_TEMP, ATTR_PROBE2_TEMP, ATTR_WARN_STATE, DOMAIN, is_probe_connected
+from .const import (
+    ATTR_PROBE1_TEMP,
+    ATTR_PROBE2_TEMP,
+    ATTR_WARN_STATE,
+    ATTR_WARNINGS,
+    DOMAIN,
+    is_probe_connected,
+)
 from .coordinator import GmgDataUpdateCoordinator
 from .entity import GmgEntity
 
@@ -59,6 +66,10 @@ class GmgWarningSensor(GmgEntity, BinarySensorEntity):
     warnState is a 4-byte combined value (see gmg.py) -- reading it as a
     single byte, as the original implementation did, could silently miss
     a real warning encoded in any of the other 3 bytes.
+
+    Which warnings are set is in the `warnings` attribute, one name per bit,
+    so two at once both show. Only low_pellet is confirmed against a real
+    capture; see const.WARN_FLAGS before trusting the other names.
     """
 
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
@@ -74,3 +85,10 @@ class GmgWarningSensor(GmgEntity, BinarySensorEntity):
         if value is None:
             return None
         return value != 0
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {
+            "warnings": self.coordinator.data.get(ATTR_WARNINGS, []),
+            "raw_code": self.coordinator.data.get(ATTR_WARN_STATE),
+        }

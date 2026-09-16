@@ -26,7 +26,7 @@ from .const import (
     is_probe_connected,
 )
 from .coordinator import GmgDataUpdateCoordinator
-from .entity import GmgEntity
+from .entity import GmgConfigEntity, GmgEntity
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -89,6 +89,7 @@ async def async_setup_entry(
         else:
             entities.append(GmgDiagnosticSensor(coordinator, description))
     entities.append(GmgRawStatusSensor(coordinator))
+    entities.append(GmgConfigBlockSensor(coordinator))
 
     async_add_entities(entities)
 
@@ -184,4 +185,46 @@ class GmgRawStatusSensor(GmgEntity, SensorEntity):
             "raw_bytes": raw,
             "raw_hex": bytes(raw).hex() if raw else None,
             **{f"byte_{i}": value for i, value in enumerate(raw)},
+        }
+
+
+class GmgConfigBlockSensor(GmgConfigEntity, SensorEntity):
+    """The Grill Config block (status bytes 8-15) as it last arrived whole.
+
+    The instrument for decoding the rest of it: change one setting in the GMG
+    app, and whichever byte moves is that setting. The six calibration bytes
+    are attributes, raw -- which byte is which box, and where each box's zero
+    sits, is inferred rather than confirmed (see gmg.GrillConfig), and a
+    guessed zero point would turn a readout into a wrong one.
+    """
+
+    _attr_name = "Config Block"
+    _attr_icon = "mdi:barcode"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _decodes_the_block = False  # raw bytes are worth seeing on any API version
+
+    def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
+        super().__init__(coordinator, "config_block")
+
+    @property
+    def native_value(self) -> str | None:
+        config = self.config
+        return None if config is None else str(config)
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        config = self.config
+        if config is None:
+            return None
+        grill_150f, grill_500f = config.grill_adjustment_raw
+        probe1_32f, probe1_212f = config.probe1_adjustment_raw
+        probe2_32f, probe2_212f = config.probe2_adjustment_raw
+        return {
+            "api_version": config.api_version,
+            "grill_adjustment_150f_raw": grill_150f,
+            "grill_adjustment_500f_raw": grill_500f,
+            "probe_1_adjustment_32f_raw": probe1_32f,
+            "probe_1_adjustment_212f_raw": probe1_212f,
+            "probe_2_adjustment_32f_raw": probe2_32f,
+            "probe_2_adjustment_212f_raw": probe2_212f,
         }
