@@ -5,6 +5,97 @@ while unblocking it for a current Home Assistant install, not assumed --
 see gmg.py's module docstring for the specifics on what's provably a bug
 versus what's preserved on purpose.
 
+## Added in 3.2.0 -- the Grill Config screen, from Home Assistant
+
+The GMG app's Grill Config screen was in every status reply all along: bytes
+8-15, which the parser skipped. They were decoded on a Jim Bowie (firmware
+2.3, "NJB APIv6") on 16 Sep 2026 by changing one setting at a time in the app
+and reading the reply back:
+
+| Byte | Setting | Observed |
+| --- | --- | --- |
+| 8 | API version | `6` |
+| 9, bit 5 | Pizza Mode | `07` -> `27` when turned on |
+| 9, bits 4-2 | Climate, 0-4 in slider order | Icy `03`, Cold `07`, Average `0b`, Warm `0f`, Hot `13` |
+| 9, bit 1 | Auto-Revert WiFi | `0b` -> `09` when turned off |
+| 9, bit 0 | Lock Temp Display | `0b` -> `0a` when turned off |
+| 10-15 | Temperature calibration boxes | `14 32 19 19 19 19` -- raw, see below |
+
+- **New entities.** **Pizza Mode** (switch) is an ordinary control, so Home
+  Assistant's HomeKit bridge can publish it. **Climate Setting** (select),
+  **Auto-Revert WiFi** and **Lock Temp Display** (switches) are config
+  entities, which the bridge never publishes. **Config Block** (diagnostic
+  sensor) shows the eight bytes as hex, with the API version and the six
+  calibration bytes as attributes.
+- **How a write works.** The only documented write is `UC` + the 8 bytes +
+  `!`, from [facultymatt/gmg-js](https://github.com/facultymatt/gmg-js) (2020),
+  whose notes record whole frames and whose author said it "used to work".
+  A write replaces all eight bytes, so `Grill.write_config_field` never
+  sends a remembered or default block. It:
+  1. reads a whole status packet from the grill -- nothing is sent if none
+     arrives;
+  2. refuses any grill that doesn't report API version 6, the only version
+     the layout is confirmed on;
+  3. changes that one field's bits, and does nothing if they already match;
+  4. sends the frame **once** -- a write that did not land is reported, never
+     repeated;
+  5. reads the block back every 2 s for up to 30 s. The exact block sent is
+     success. Any other change fails at once, with the before / sent / now
+     blocks in the error so the GMG app can put things back. No change at all
+     fails at 30 s.
+
+  Writes are serialised, so two quick toggles cannot both start from the
+  same block and undo each other. A failure shows in Home Assistant as an
+  error on the toggle or the automation step.
+- **gmg-js's own Pizza Mode write had a bug** that this avoids: it overwrote
+  the whole top nibble of byte 9, which also clears bit 4 and silently drops
+  a grill on Hot to Icy. Its other numbers agree once the fields are split --
+  its "Hot = 1" is bit 4 alone, its "Average = 8" is bits 4-2 with both
+  toggles still attached.
+- **Bytes 10-15 are read, never written.** GMG's support pages say each
+  adjustment has a left and a right box: the grill's apply at 150F and 500F,
+  each probe's at 32F and 212F. Which byte is which box, and the stored zero
+  (probably 20 / 50 / 25, since this grill reads `20 50 25 25 25 25` while the
+  app shows 0 everywhere), are inferred. So the sensor labels them by box and
+  shows them raw. Setting one box in the app and watching which byte moves
+  will settle it.
+- **Only a whole 52-byte packet is trusted for the block.** Cut and merged
+  replies arrive too, and a misaligned byte 9 can read as Pizza Mode ON.
+  Between whole packets the entities keep showing the last whole block --
+  for display only; a write always reads the grill first. On grills that
+  send 36-byte replies, the Grill Config entities stay unavailable.
+- **Warning** (binary sensor) now lists which warnings are set, in a
+  `warnings` attribute, plus the raw code (see below).
+
+## Fixed in 3.2.0
+
+- **Phantom cooks: a reply that lost its first bytes was read at the wrong
+  offsets.** `status()` only checked length. But on one install 54 of 1,768
+  polls in 48 hours arrived with 1-18 bytes missing from the front -- 46, 48,
+  50 bytes, plenty to pass -- and every field then sat somewhere else. Home
+  Assistant recorded grill temperatures of 601F, 2822F and 38402F, fire states
+  like `unknown_85`, and a cold grill "on": 12 of the 21 off-to-on changes it
+  recorded in 10 days were one bad reply, not a cook. A reply must now start
+  `UR` to be read, and is otherwise retried like a short one. A reply cut at
+  the end, or two run together, still starts `UR` with every field in place,
+  so those are still read.
+- **Probe targets under 100F were sent unpadded.** `UF32!` is now `UF032!`
+  (and `Uf` for probe 2), as every other implementation sends them; the
+  Aenima4six2 emulator only recognises `UF(\d{3})!`. `UT` is padded the same
+  way for consistency (grill targets are always three digits anyway).
+- **`warnState` is decoded as flags**, so two warnings at once both show
+  instead of reading as neither. The only real non-zero capture anyone has
+  (gmg-js, 2020) is low pellets = 128, which is bit 7 -- and bit 7 is where
+  low pellets lands if brandenco's warning list is read as one bit each. The
+  other seven names follow that order and are **unconfirmed**: the
+  Aenima4six2 emulator reads the same list as one code in steps of 16, and
+  the two readings agree only on 128. Unnamed bits show as `unknown_bit_N`.
+- **The Home Assistant tests run, in CI.** `tests/test_init.py` never enabled
+  custom integrations, so it failed ("Integration not found") -- unnoticed,
+  because CI only ran the pure-Python file. A new CI job installs Home
+  Assistant 2026.9.2's test harness and runs everything, including new
+  entity tests that drive the real write path against a simulated grill.
+
 ## Fixed in 3.1.2
 
 - **A short status response is now retried instead of raising.** `status()`
@@ -183,15 +274,20 @@ this project's own original testing notes, not the wire protocol.
 
 - Fire state's friendly names are only 2-of-7 independently confirmed (see
   3.0.0 above) -- the rest are plausible, not certain.
-- `warnState`'s 4-byte combination is structurally consistent with
-  everything else that has been confirmed, but hasn't itself been checked
-  against a real non-zero warning -- both known payloads show zero.
+- `warnState`: only low pellets (128, bit 7) has been seen for real. The
+  other seven flag names are an inference that one other source contradicts
+  (see 3.2.0).
+- The `UC` config write is single-sourced (gmg-js, 2020). The byte layout
+  it writes is confirmed on APIv6 by reading; each write is confirmed only by
+  reading the block back afterwards, and it is refused on any other API
+  version.
+- Bytes 10-15 (the calibration boxes) are exposed raw and never written: the
+  byte-to-box mapping and the zero points are inferred, not confirmed.
 - Whatever's in the currently-undecoded bytes (see Raw Status sensor,
   added 2.1.0) hasn't been identified. It's observable now, not decoded.
 - `PowerState == 2` ("fan," per the reference project's own enum) has no
   confirmed real example in either project and isn't mapped to anything.
-- Test coverage now includes `tests/test_gmg_parsing.py` (the protocol
-  parsing itself, runnable without any Home Assistant test harness) but
-  still doesn't cover the entity-layer modules (sensor/number/
-  binary_sensor/config_flow) -- those still only have the original bare
-  component-setup test.
+- Test coverage: the protocol (`tests/test_gmg_parsing.py`,
+  `tests/test_gmg_config.py`, no Home Assistant needed) and the Grill Config
+  and warning entities (`tests/test_config_entities.py`). The climate and
+  number entities and the config flow are still barely tested.
