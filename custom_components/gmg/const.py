@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 DOMAIN = "gmg"
 
 CONF_SERIAL_NUMBER = "serial_number"
@@ -27,26 +29,51 @@ ATTR_CONFIG = "config"  # gmg.GrillConfig, or None -- see STATUS_PACKET_BYTES
 # github.com/brandenco/green-mountain-grill's own reverse-engineering and
 # its test fixtures -- ON=1 and OFF=0 match this project's own prior
 # testing; COLD_SMOKE=3 is independently confirmed against a real captured
-# payload (its "power on cold smoke" test case). FAN=2 is in the other
-# project's enum but neither project has a confirmed example of it -- do
-# not assume it means the same thing power_on_cool() actually produces.
+# payload (its "power on cold smoke" test case). FAN=2 is confirmed by five
+# real cooks (6-16 Sep 2026): every power-off went to 2 for about 16 minutes
+# before 0 -- the "fan mode" GMG's manual says powering down starts.
 POWER_STATE_OFF = 0
 POWER_STATE_ON = 1
-POWER_STATE_FAN = 2  # unconfirmed by any known real payload
+POWER_STATE_FAN = 2  # confirmed: the fan cooldown after power-off
 POWER_STATE_COLD_SMOKE = 3  # confirmed: matches this project's own UK002! command
 
-# Fire state values (raw byte 32). Same source as above. Only OFF (1) and
-# COLD_SMOKE (198) are confirmed against real captured payloads; the rest
-# are carried over from the other project's enum, unconfirmed here.
+# Fire state values (raw byte 32). Same source as above. OFF (1) and
+# COLD_SMOKE (198) are confirmed against real captured payloads, and STARTUP,
+# RUNNING and COOLDOWN by five real cooks (6-16 Sep 2026): off -> startup
+# (ambient to ~150F) -> running, with startup again whenever the grill fell
+# back below temperature -> cooldown after power-off -> off. "default" and
+# "fail" are carried over from the other project's enum, never seen here.
+FIRE_STATE_OFF = 1
+FIRE_STATE_STARTUP = 2
+FIRE_STATE_RUNNING = 3
+FIRE_STATE_COOLDOWN = 4
 FIRE_STATE_NAMES = {
     0: "default",
-    1: "off",  # confirmed
-    2: "startup",
-    3: "running",
-    4: "cooldown",
+    FIRE_STATE_OFF: "off",  # confirmed
+    FIRE_STATE_STARTUP: "startup",  # confirmed
+    FIRE_STATE_RUNNING: "running",  # confirmed
+    FIRE_STATE_COOLDOWN: "cooldown",  # confirmed
     5: "fail",
     198: "cold_smoke",  # confirmed
 }
+
+# The status reply carries no auger, fan or igniter bits: across those five
+# cooks, every byte outside the decoded fields stayed constant. These two are
+# what the reply does say about the fire.
+
+
+def is_fire_active(fire_state: int | None) -> bool | None:
+    """Whether pellets are burning: the fire is starting up or running."""
+    if fire_state is None:
+        return None
+    return fire_state in (FIRE_STATE_STARTUP, FIRE_STATE_RUNNING)
+
+
+def is_cooldown(power_state: int | None, fire_state: int | None) -> bool | None:
+    """Whether the grill is in its post-shutdown fan cooldown."""
+    if power_state is None and fire_state is None:
+        return None
+    return power_state == POWER_STATE_FAN or fire_state == FIRE_STATE_COOLDOWN
 
 # warnState (status bytes 24-27), read as one flag per bit.
 #
@@ -89,6 +116,16 @@ MAX_TEMP_F_PROBE = 257
 
 MAX_STATUS_RETRIES = 5
 
+# The finish-time estimate (analytics.ProbeTrend) fits a straight line through
+# the last ETA_WINDOW of a probe's readings. It needs ETA_MIN_SAMPLES readings
+# spanning ETA_MIN_SPAN. A rise slower than ETA_MIN_RATE is a stall, and a
+# finish further off than ETA_MAX_AHEAD is not worth showing.
+ETA_WINDOW = timedelta(minutes=20)
+ETA_MIN_SPAN = timedelta(minutes=5)
+ETA_MIN_SAMPLES = 5
+ETA_MIN_RATE = 2.0  # F per hour -- the same line the stall automation draws
+ETA_MAX_AHEAD = timedelta(hours=24)
+
 # Grill Config writes (gmg.Grill.write_config_field). The block layout is
 # confirmed on API version 6 only (status byte 8); any other grill is left
 # alone rather than risk scrambling its probe calibration.
@@ -103,6 +140,11 @@ CONFIG_READ_ATTEMPTS = 10
 CONFIG_CONFIRM_POLLS = 15
 CONFIG_CONFIRM_FIRST_DELAY = 0.5  # seconds
 CONFIG_CONFIRM_INTERVAL = 2  # seconds
+# Between whole replies the Grill Config entities show the last whole block,
+# for at most this long; after that they go unavailable rather than show a
+# setting nobody has seen recently. (Status fields never age: a poll that
+# fails takes every entity unavailable straight away.)
+CONFIG_MAX_AGE = timedelta(seconds=90)
 
 # The shortest status payload _parse_status can read. It indexes values[33]
 # (fireStatePercentage), so anything under 34 bytes cannot be parsed at all.

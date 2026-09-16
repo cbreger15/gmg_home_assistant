@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -12,17 +13,23 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
+from .analytics import ProbeTrend
 from .const import (
     ATTR_FIRE_STATE,
     ATTR_FIRE_STATE_PCT,
+    ATTR_ON,
+    ATTR_PROBE1_SET_TEMP,
     ATTR_PROBE1_TEMP,
     ATTR_PROBE2_TEMP,
     DOMAIN,
     FIRE_STATE_NAMES,
+    POWER_STATE_COLD_SMOKE,
+    POWER_STATE_ON,
     is_probe_connected,
 )
 from .coordinator import GmgDataUpdateCoordinator
@@ -90,6 +97,7 @@ async def async_setup_entry(
             entities.append(GmgDiagnosticSensor(coordinator, description))
     entities.append(GmgRawStatusSensor(coordinator))
     entities.append(GmgConfigBlockSensor(coordinator))
+    entities.append(GmgProbeFinishTimeSensor(coordinator))
 
     async_add_entities(entities)
 
@@ -114,12 +122,12 @@ class GmgDiagnosticSensor(GmgEntity, SensorEntity):
 class GmgFireStateSensor(GmgDiagnosticSensor):
     """Fire state, as a friendly name where one is known.
 
-    Only "off" (1) and "cold_smoke" (198) are independently confirmed
-    against real captured payloads (see const.py). The others are carried
-    over from an independent reverse-engineering project's own enum but
-    unconfirmed here -- if one of those shows up, it's worth treating as
-    "probably right, worth double-checking" rather than certain. The raw
-    numeric code is always available as an attribute regardless.
+    "off", "startup", "running", "cooldown" and "cold_smoke" are confirmed
+    on real grills (see const.py). "default" (0) and "fail" (5) are carried
+    over from an independent reverse-engineering project's own enum and have
+    never been seen -- if one shows up, treat it as "probably right, worth
+    double-checking" rather than certain. The raw numeric code is always
+    available as an attribute regardless.
     """
 
     @property
@@ -234,3 +242,73 @@ class GmgConfigBlockSensor(GmgConfigEntity, SensorEntity):
             **dict(zip(CALIBRATION_ATTRIBUTES, shown)),
             **{f"{name}_raw": value for name, value in zip(CALIBRATION_ATTRIBUTES, raw)},
         }
+
+
+class GmgProbeFinishTimeSensor(GmgEntity, SensorEntity):
+    """When probe 1 will reach its target at its current rate of rise.
+
+    A straight line through the last 20 minutes of readings (see
+    analytics.ProbeTrend). Unavailable when there is nothing to estimate --
+    the grill is not cooking, the probe is unplugged, or no target is set --
+    and unknown when there is no honest estimate yet: too few readings, a
+    stall or a fall, or the target already reached. Unplugging the probe or
+    stopping the fire starts the trend again.
+    """
+
+    _attr_name = "Probe 1 Estimated Finish Time"
+    _attr_icon = "mdi:timer-sand"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.grill.serial_number}_probe_1_estimated_finish_time"
+        self._trend = ProbeTrend()
+
+    def _probe(self) -> int | None:
+        """Probe 1's reading while the grill is cooking and the probe is in, else None."""
+        data = self.coordinator.data
+        if data.get(ATTR_ON) not in (POWER_STATE_ON, POWER_STATE_COLD_SMOKE):
+            return None
+        temperature = data.get(ATTR_PROBE1_TEMP)
+        return temperature if is_probe_connected(temperature) else None
+
+    def _record(self) -> None:
+        if not self.coordinator.last_update_success:
+            # A failed poll is announced too, with the last good data: a
+            # reading from an earlier poll, not a new one.
+            return
+        temperature = self._probe()
+        if temperature is None:
+            self._trend.clear()
+        else:
+            self._trend.add(dt_util.utcnow(), temperature)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._record()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        self._record()
+        super()._handle_coordinator_update()
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self._probe() is not None
+            and bool(self.coordinator.data.get(ATTR_PROBE1_SET_TEMP))
+        )
+
+    @property
+    def native_value(self) -> datetime | None:
+        finish = self._trend.finish_time(self.coordinator.data[ATTR_PROBE1_SET_TEMP])
+        if finish is None:
+            return None
+        # To the minute: a new second every poll is noise, not information.
+        return (finish + timedelta(seconds=30)).replace(second=0, microsecond=0)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        rate = self._trend.rate_per_hour()
+        return {"rate_f_per_hour": None if rate is None else round(rate, 1)}

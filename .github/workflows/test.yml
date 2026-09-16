@@ -18,6 +18,8 @@ jobs:
         run: python tests/test_gmg_parsing.py
       - name: Run Grill Config tests
         run: python tests/test_gmg_config.py
+      - name: Run finish-time tests
+        run: python tests/test_analytics.py
 
   ha-tests:
     name: Home Assistant tests

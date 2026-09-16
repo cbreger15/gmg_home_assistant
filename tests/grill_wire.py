@@ -89,6 +89,41 @@ APP_CALIBRATED_ALL = bytes.fromhex(
     "004a42303253554630322e33"
 )
 
+# One real cook, 15-16 Sep: whole replies at each stage. Byte 30 is the power
+# state, byte 32 the fire state, byte 33 the stage's progress.
+COOK_OFF = bytes.fromhex(  # 15 Sep 23:10 UTC: off (0/1), 78F
+    "55524e0059029600060714321919191959020000ffffffff00000000000000000100000300000000"
+    "004a42303253554630322e33"
+)
+COOK_STARTUP = bytes.fromhex(  # 23:17: on, starting up (1/2), 77F, 25%
+    "55524d0059029600060714321919191959020000ffffffff00000000000001000219000300000000"
+    "004a42303253554630322e33"
+)
+COOK_RUNNING = bytes.fromhex(  # 23:39: on, running (1/3), 314F of 500F, 100%
+    "55523a015902f401060714321919191959020000ffffffff00000000000001000364000300000000"
+    "004a42303253554630322e33"
+)
+COOK_COOLDOWN = bytes.fromhex(  # 16 Sep 00:22: fan cooldown after power-off (2/4), 484F
+    "5552e4015902db01060714321919191959020000ffffffff0000000000000200044b000300000000"
+    "004a42303253554630322e33"
+)
+
+
+# brandenco/green-mountain-grill's captured "power on cold smoke" reply
+# (another grill, 36 bytes): power 3, fire 198.
+COLD_SMOKE_36 = bytes.fromhex(
+    "5552660059021e00050b1432191919195902fa00ffffffff0000000096000300c6000003"
+)
+
+
+def with_probe1(packet, temperature, target):
+    """A whole reply with probe 1's reading (bytes 4-5) and target (28-29) replaced."""
+    changed = bytearray(packet)
+    changed[4:6] = temperature.to_bytes(2, "little")
+    changed[28:30] = target.to_bytes(2, "little")
+    return bytes(changed)
+
+
 # Real pieces of a reply (13 Sep): one byte short of whole, and two whole
 # replies run together. Both start UR, so their status fields are readable,
 # but neither is exactly one packet -- and both carry an older block (0b).

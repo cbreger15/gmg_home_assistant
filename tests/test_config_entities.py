@@ -6,14 +6,12 @@ sequence. Needs pytest-homeassistant-custom-component (requirements.test.txt).
 """
 
 import asyncio
+from datetime import timedelta
 import threading
-from unittest.mock import patch
 
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.const import (
-    ATTR_ENTITY_ID,
     STATE_OFF,
     STATE_ON,
     STATE_UNAVAILABLE,
@@ -23,21 +21,19 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
-from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
 from custom_components.gmg import gmg
-from custom_components.gmg.const import CONF_IP, CONF_SERIAL_NUMBER, CONFIG_READ_ATTEMPTS, DOMAIN
-from custom_components.gmg.gmg import Grill
+from custom_components.gmg.const import CONFIG_READ_ATTEMPTS, DOMAIN
 from tests.grill_wire import (
     APP_CALIBRATED_ALL,
     LIVE,
     MERGED_104,
     STATUS,
     TAIL_CUT_51,
-    TEST_IP,
     NoNetwork,
     WireGrill,
 )
+from tests.ha_setup import PREFIX, call as _call, poll as _poll, set_up as _set_up
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -47,46 +43,14 @@ def no_real_grill(monkeypatch: pytest.MonkeyPatch) -> None:
     """Any send that gets past WireGrill fails the test instead of leaving the machine."""
     monkeypatch.setattr(gmg, "socket", NoNetwork())
 
-SERIAL = "GMG12272191"
-PIZZA = "switch.green_mountain_grill_gmg12272191_pizza_mode"
-AUTO_REVERT = "switch.green_mountain_grill_gmg12272191_auto_revert_wifi"
-LOCK = "switch.green_mountain_grill_gmg12272191_lock_temp_display"
-CLIMATE_SETTING = "select.green_mountain_grill_gmg12272191_climate_setting"
-BLOCK = "sensor.green_mountain_grill_gmg12272191_config_block"
-WARNING = "binary_sensor.green_mountain_grill_gmg12272191_warning"
-GRILL = "climate.green_mountain_grill_gmg12272191"
 
-
-async def _set_up(hass: HomeAssistant, wire: WireGrill) -> MockConfigEntry:
-    hass.config.units = US_CUSTOMARY_SYSTEM  # temperatures read back in F, as sent
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        unique_id=SERIAL,
-        data={CONF_IP: TEST_IP, CONF_SERIAL_NUMBER: SERIAL},
-    )
-    entry.add_to_hass(hass)
-
-    def grill_on_the_wire(ip: str, serial: str) -> Grill:
-        grill = Grill(ip, serial)
-        grill.send = wire.send
-        grill._sleep = wire.sleep
-        return grill
-
-    with patch("custom_components.gmg.Grill", side_effect=grill_on_the_wire):
-        assert await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
-    return entry
-
-
-async def _poll(hass: HomeAssistant, entry: MockConfigEntry) -> None:
-    await hass.data[DOMAIN][entry.entry_id].async_refresh()
-    await hass.async_block_till_done()
-
-
-async def _call(hass: HomeAssistant, domain: str, service: str, entity_id: str, **data) -> None:
-    await hass.services.async_call(
-        domain, service, {ATTR_ENTITY_ID: entity_id, **data}, blocking=True
-    )
+PIZZA = f"switch.{PREFIX}_pizza_mode"
+AUTO_REVERT = f"switch.{PREFIX}_auto_revert_wifi"
+LOCK = f"switch.{PREFIX}_lock_temp_display"
+CLIMATE_SETTING = f"select.{PREFIX}_climate_setting"
+BLOCK = f"sensor.{PREFIX}_config_block"
+WARNING = f"binary_sensor.{PREFIX}_warning"
+GRILL = f"climate.{PREFIX}"
 
 
 async def test_the_controls_show_the_grill_settings(hass: HomeAssistant) -> None:
@@ -312,6 +276,33 @@ async def test_settings_are_unavailable_until_a_whole_packet_arrives(hass: HomeA
 
     assert hass.states.get(PIZZA).state == STATE_OFF
     assert hass.states.get(CLIMATE_SETTING).state == "Average"
+
+
+async def test_settings_go_unavailable_after_90_seconds_without_a_whole_packet(
+    hass: HomeAssistant, freezer
+) -> None:
+    """The last whole block stands in for a cut reply, but not for ever:
+    automations must never act on a setting nobody has seen for 90 s."""
+    freezer.move_to("2026-09-16 18:00:00+00:00")
+    wire = WireGrill(LIVE["09"])
+    entry = await _set_up(hass, wire)
+
+    for seconds in (30, 60, 90):
+        freezer.tick(timedelta(seconds=30))
+        wire.script = [TAIL_CUT_51]
+        await _poll(hass, entry)
+        assert hass.states.get(PIZZA).state == STATE_OFF, f"{seconds} s after the whole packet"
+
+    freezer.tick(timedelta(seconds=30))  # 120 s
+    wire.script = [TAIL_CUT_51]
+    await _poll(hass, entry)
+    for entity_id in (PIZZA, AUTO_REVERT, LOCK, CLIMATE_SETTING, BLOCK):
+        assert hass.states.get(entity_id).state == STATE_UNAVAILABLE, entity_id
+    assert hass.states.get(GRILL).state == "off", "the status fields are still fresh"
+
+    freezer.tick(timedelta(seconds=30))
+    await _poll(hass, entry)  # a whole packet again
+    assert hass.states.get(PIZZA).state == STATE_OFF
 
 
 async def test_a_climate_the_app_never_offers_reads_as_unknown(hass: HomeAssistant) -> None:

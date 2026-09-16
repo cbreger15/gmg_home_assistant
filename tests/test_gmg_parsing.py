@@ -50,9 +50,9 @@ except ImportError:
     _gmg = _load("custom_components.gmg.gmg", "gmg.py")
 
 try:
-    from tests.grill_wire import TEST_IP, NoNetwork
+    from tests.grill_wire import COOK_COOLDOWN, COOK_OFF, COOK_RUNNING, COOK_STARTUP, TEST_IP, NoNetwork
 except ImportError:  # run directly: tests/ itself is on sys.path
-    from grill_wire import TEST_IP, NoNetwork
+    from grill_wire import COOK_COOLDOWN, COOK_OFF, COOK_RUNNING, COOK_STARTUP, TEST_IP, NoNetwork
 
 # No test here may reach a real grill: every Grill.send below is replaced,
 # and anything that slips past that fails instead of sending.
@@ -135,6 +135,35 @@ def test_power_on_cold_smoke():
     assert state["on"] == 3  # PowerStateColdSmoke -- NOT 2, the original's assumption
     assert state["fireState"] == 198  # FireStateColdSmoke
     assert state["warnState"] == 0
+
+
+def test_a_real_cook_reads_as_its_stages():
+    """Power (byte 30) and fire (byte 32) through one real cook, 15-16 Sep.
+    Five cooks in ten days follow the same sequence."""
+    #   packet,        power, fire, fire active, cooldown fan
+    stages = [
+        (COOK_OFF, 0, 1, False, False),
+        (COOK_STARTUP, 1, 2, True, False),
+        (COOK_RUNNING, 1, 3, True, False),
+        (COOK_COOLDOWN, 2, 4, False, True),
+    ]
+    for packet, power, fire, fire_active, cooldown in stages:
+        state = Grill._parse_status(packet)
+        assert (state["on"], state["fireState"]) == (power, fire)
+        assert _const.is_fire_active(state["fireState"]) is fire_active, (power, fire)
+        assert _const.is_cooldown(state["on"], state["fireState"]) is cooldown, (power, fire)
+
+
+def test_fire_and_cooldown_rules_at_the_edges():
+    is_fire_active, is_cooldown = _const.is_fire_active, _const.is_cooldown
+    assert is_fire_active(None) is None
+    assert is_fire_active(198) is False  # cold smoke: the fan runs, nothing burns in the pot
+    assert is_fire_active(5) is False  # "fail", from brandenco's list; never seen
+    assert is_cooldown(None, None) is None
+    assert is_cooldown(2, None) is True  # power says fan, fire unknown
+    assert is_cooldown(None, 4) is True  # fire says cooldown, power unknown
+    assert is_cooldown(1, 3) is False
+    assert is_cooldown(3, 198) is False  # cold smoke is not the shutdown fan
 
 
 def test_short_response_raises_instead_of_hanging_or_crashing():
