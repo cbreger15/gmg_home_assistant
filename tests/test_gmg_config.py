@@ -43,11 +43,33 @@ except ImportError:
     _gmg = _load("custom_components.gmg.gmg", "gmg.py")
 
 try:
-    from tests.grill_wire import LIVE, LIVE_REPLY, MERGED_104, STATUS, TAIL_CUT_51, WireGrill
+    from tests.grill_wire import (
+        LIVE,
+        LIVE_REPLY,
+        MERGED_104,
+        STATUS,
+        TAIL_CUT_51,
+        TEST_IP,
+        NoNetwork,
+        WireGrill,
+    )
 except ImportError:  # run directly: tests/ itself is on sys.path
-    from grill_wire import LIVE, LIVE_REPLY, MERGED_104, STATUS, TAIL_CUT_51, WireGrill
+    from grill_wire import (
+        LIVE,
+        LIVE_REPLY,
+        MERGED_104,
+        STATUS,
+        TAIL_CUT_51,
+        TEST_IP,
+        NoNetwork,
+        WireGrill,
+    )
+
+# No test here may reach a real grill -- see grill_wire.NoNetwork.
+_gmg.socket = NoNetwork()
 
 Grill = _gmg.Grill
+ConfigField = _gmg.ConfigField
 GmgCommunicationError = _gmg.GmgCommunicationError
 GmgConfigWriteError = _gmg.GmgConfigWriteError
 GrillConfig = _gmg.GrillConfig
@@ -164,6 +186,21 @@ def test_with_field_refuses_values_the_app_does_not_offer():
         assert raised, f"{field.name}={bad} must be refused"
 
 
+def test_a_field_must_fit_inside_the_block():
+    # (name, index, shift, width, max_value)
+    for bad in (
+        ("too_big", 1, 0, 1, 2),  # 2 does not fit one bit
+        ("past_the_byte", 1, 6, 3, 4),  # bits 6-8
+        ("past_the_block", 8, 0, 1, 1),  # the block is bytes 0-7
+    ):
+        try:
+            ConfigField(*bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, f"{bad[0]} must be refused at definition"
+
+
 # ---------------------------------------------------------------------------
 # The write path. WireGrill stands in for the grill's end of the UDP link, so
 # these run the real read-change-write-confirm sequence without a network.
@@ -171,10 +208,16 @@ def test_with_field_refuses_values_the_app_does_not_offer():
 
 
 def _grill_on(wire):
-    g = Grill("10.0.0.1", "TEST")
+    g = Grill(TEST_IP, "TEST")
     g.send = wire.send
     g._sleep = wire.sleep
     return g
+
+
+def _reads_after_the_write(wire):
+    sent = wire.sent()
+    frame_at = next(i for i, message in enumerate(sent) if message[:2] == b"UC")
+    return sent[frame_at + 1 :].count(STATUS)
 
 
 def _raises(exc_type, fn, *args):
@@ -197,11 +240,40 @@ def test_write_reads_the_grill_then_sends_one_frame_and_confirms_it():
     assert state["config"].pizza_mode is True, "the result is the grill's own packet"
 
 
-def test_write_waits_before_reading_the_result_back():
+def test_write_reads_twice_then_waits_before_reading_the_result_back():
     wire = WireGrill(LIVE["09"])
     _grill_on(wire).write_config_field(PIZZA_MODE, 1)
     kinds = [kind if kind == "sleep" else message for kind, message in wire.events]
-    assert kinds[:4] == [STATUS, PIZZA_ON_FROM_09, "sleep", STATUS]
+    assert kinds[:5] == [STATUS, STATUS, PIZZA_ON_FROM_09, "sleep", STATUS]
+
+
+def test_write_trusts_a_block_only_when_two_whole_replies_agree():
+    """The read-back cannot catch a bad starting block -- the grill reports
+    whatever it was sent -- and this link delivers replies held back from
+    earlier requests. Here one from before the app turned Auto-Revert WiFi
+    off (0b) arrives first; the grill really holds 09."""
+    wire = WireGrill(LIVE["09"], script=[LIVE["0b"], LIVE_REPLY, LIVE_REPLY])
+    _grill_on(wire).write_config_field(PIZZA_MODE, 1)
+    assert wire.writes() == [PIZZA_ON_FROM_09], "built from 0b it would be 2b"
+
+
+def test_write_is_not_fooled_by_a_spliced_reply():
+    # 52 bytes, starts UR, API version 6 -- but bytes 14-51 are another
+    # reply's head. Trusted, it would write 55 52 into probe 2's calibration.
+    spliced = LIVE["09"][:14] + LIVE["09"][:38]
+    assert len(spliced) == 52 and spliced[:2] == b"UR" and spliced[8] == 6
+    wire = WireGrill(LIVE["09"], script=[spliced, LIVE_REPLY, LIVE_REPLY])
+    _grill_on(wire).write_config_field(PIZZA_MODE, 1)
+    assert wire.writes() == [PIZZA_ON_FROM_09]
+
+
+def test_write_sends_nothing_when_whole_replies_never_agree():
+    attempts = _const.CONFIG_READ_ATTEMPTS
+    wire = WireGrill(LIVE["09"], script=[LIVE["0b"], LIVE["09"]] * attempts)
+    err = _raises(GmgConfigWriteError, _grill_on(wire).write_config_field, PIZZA_MODE, 1)
+    assert wire.writes() == []
+    assert wire.sent() == [STATUS] * attempts
+    assert "06 0b" in str(err) and "06 09" in str(err), f"the error should show both: {err}"
 
 
 def test_each_write_starts_from_the_block_as_it_is_now():
@@ -225,10 +297,13 @@ def test_write_reads_past_lost_cut_merged_and_headless_replies():
 
 
 def test_write_sends_nothing_without_a_whole_packet_to_start_from():
-    wire = WireGrill(LIVE["09"], script=[None, TAIL_CUT_51, MERGED_104, None, TAIL_CUT_51])
+    attempts = _const.CONFIG_READ_ATTEMPTS
+    # One whole reply in the lot is not enough either.
+    unusable = ([None, TAIL_CUT_51, MERGED_104] * attempts)[: attempts - 1]
+    wire = WireGrill(LIVE["09"], script=[LIVE_REPLY] + unusable)
     err = _raises(GmgCommunicationError, _grill_on(wire).write_config_field, PIZZA_MODE, 1)
     assert wire.writes() == [], f"nothing may be sent without a fresh block ({err})"
-    assert wire.sent() == [STATUS] * _const.MAX_STATUS_RETRIES
+    assert wire.sent() == [STATUS] * attempts
 
 
 def test_write_refuses_a_grill_on_an_unverified_api_version():
@@ -249,8 +324,24 @@ def test_write_sends_nothing_when_the_setting_is_already_there():
 
 def test_write_refuses_a_value_the_app_does_not_offer_before_touching_the_network():
     wire = WireGrill(LIVE["09"])
-    _raises(ValueError, _grill_on(wire).write_config_field, CLIMATE, 5)
+    g = _grill_on(wire)
+    for bad in (5, -1, 1.0, "1"):
+        _raises(ValueError, g.write_config_field, CLIMATE, bad)
     assert wire.sent() == []
+
+
+def test_write_refuses_a_block_containing_the_command_terminator():
+    """Every command ends with "!" (0x21). Icy with Pizza Mode and Lock Temp
+    Display on and Auto-Revert WiFi off makes byte 9 exactly 0x21. Whether
+    the grill reads such a frame whole or stops at that byte is unknown, and
+    a cut-short write could scramble the calibration bytes -- so it is not
+    sent from here until that is known."""
+    packet = bytearray(LIVE["09"])
+    packet[9] = 0x29  # Pizza Mode on, Average
+    wire = WireGrill(bytes(packet))
+    err = _raises(GmgConfigWriteError, _grill_on(wire).write_config_field, CLIMATE, 0)
+    assert wire.writes() == []
+    assert "0x21" in str(err), f"the error should say why: {err}"
 
 
 def test_write_fails_at_once_when_the_grill_reports_a_different_block():
@@ -261,19 +352,21 @@ def test_write_fails_at_once_when_the_grill_reports_a_different_block():
     for block in ("06 09 14 32 19 19 19 19", "06 29 14 32 19 19 19 19", "06 2b 14 32 19 19 19 19"):
         assert block in message, f"the error must show {block} (before / sent / now): {message}"
     assert len(wire.writes()) == 1, "a failed write is never resent"
-    assert wire.sent().count(STATUS) == 2, "a definite mismatch should not wait out the clock"
+    assert _reads_after_the_write(wire) == 1, "a definite mismatch should not wait out the clock"
 
 
 def test_write_fails_when_the_change_never_shows_and_never_resends():
     wire = WireGrill(LIVE["09"], apply=lambda block: None)  # the grill ignores it
     err = _raises(GmgConfigWriteError, _grill_on(wire).write_config_field, PIZZA_MODE, 1)
     assert len(wire.writes()) == 1, "a failed write is never resent"
-    assert wire.sent().count(STATUS) == 1 + _const.CONFIG_CONFIRM_POLLS
+    assert _reads_after_the_write(wire) == _const.CONFIG_CONFIRM_POLLS
     assert "06 09 14 32 19 19 19 19" in str(err), f"the error should show what the grill kept: {err}"
 
 
 def test_write_says_the_result_is_unknown_when_the_grill_goes_quiet():
-    wire = WireGrill(LIVE["09"], script=[LIVE_REPLY] + [None] * _const.CONFIG_CONFIRM_POLLS)
+    wire = WireGrill(
+        LIVE["09"], script=[LIVE_REPLY, LIVE_REPLY] + [None] * _const.CONFIG_CONFIRM_POLLS
+    )
     err = _raises(GmgConfigWriteError, _grill_on(wire).write_config_field, PIZZA_MODE, 1)
     assert "unknown" in str(err), f"no reply is not the same as no change: {err}"
     assert len(wire.writes()) == 1
@@ -282,10 +375,33 @@ def test_write_says_the_result_is_unknown_when_the_grill_goes_quiet():
 def test_write_waits_through_slow_lost_and_cut_replies_until_the_change_shows():
     # Applied only on the third poll after the write; the replies in between
     # are lost or cut, and the cut ones carry an older block (0b).
-    wire = WireGrill(LIVE["09"], script=[LIVE_REPLY, None, TAIL_CUT_51, MERGED_104], applies_after=3)
+    wire = WireGrill(
+        LIVE["09"],
+        script=[LIVE_REPLY, LIVE_REPLY, None, TAIL_CUT_51, MERGED_104],
+        applies_after=3,
+    )
     state = _grill_on(wire).write_config_field(PIZZA_MODE, 1)
     assert state["config"].block == bytes.fromhex("0629143219191919")
     assert len(wire.writes()) == 1
+
+
+def _write_at_once(writes):
+    """Run (grill, field, value) writes on threads started together."""
+    errors = []
+
+    def write(grill, field, value):
+        try:
+            grill.write_config_field(field, value)
+        except Exception as err:  # noqa: BLE001 -- collected for the assertion below
+            errors.append(err)
+
+    threads = [threading.Thread(target=write, args=args) for args in writes]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in threads), "a write never finished"
+    return errors
 
 
 def test_two_writes_at_once_both_land():
@@ -293,22 +409,16 @@ def test_two_writes_at_once_both_land():
     second write would put back whatever the first one changed."""
     wire = WireGrill(LIVE["09"], rendezvous=threading.Barrier(2, timeout=0.5))
     g = _grill_on(wire)
-    errors = []
+    assert _write_at_once([(g, PIZZA_MODE, 1), (g, LOCK_TEMP_DISPLAY, 0)]) == []
+    assert wire.packet[9] == 0x28, f"both changes should be on the grill, got {wire.packet[9]:02x}"
 
-    def write(field, value):
-        try:
-            g.write_config_field(field, value)
-        except Exception as err:  # noqa: BLE001 -- collected for the assertion below
-            errors.append(err)
 
-    threads = [
-        threading.Thread(target=write, args=(PIZZA_MODE, 1)),
-        threading.Thread(target=write, args=(LOCK_TEMP_DISPLAY, 0)),
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=10)
+def test_writes_through_two_grill_objects_for_one_grill_both_land():
+    """Reloading the integration makes a new Grill while the old one may
+    still be confirming a write; they must still take turns."""
+    wire = WireGrill(LIVE["09"], rendezvous=threading.Barrier(2, timeout=0.5))
+    before_reload, after_reload = _grill_on(wire), _grill_on(wire)
+    errors = _write_at_once([(before_reload, PIZZA_MODE, 1), (after_reload, LOCK_TEMP_DISPLAY, 0)])
     assert errors == []
     assert wire.packet[9] == 0x28, f"both changes should be on the grill, got {wire.packet[9]:02x}"
 

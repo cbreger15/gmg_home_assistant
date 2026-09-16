@@ -16,7 +16,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Green Mountain Grill from a config entry."""
     grill = Grill(entry.data[CONF_IP], entry.data[CONF_SERIAL_NUMBER])
 
-    coordinator = GmgDataUpdateCoordinator(hass, grill)
+    coordinator = GmgDataUpdateCoordinator(hass, entry, grill)
     await coordinator.async_config_entry_first_refresh()
 
     # Firmware doesn't change mid-cook -- fetched once here, not on every

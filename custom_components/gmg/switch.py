@@ -6,7 +6,7 @@ and waits for the grill to report it -- see gmg.Grill.write_config_field.
 
 Pizza Mode is a user-facing control (no entity_category), so Home
 Assistant's HomeKit bridge can publish it; the two housekeeping toggles are
-config entities, which the bridge never publishes.
+config entities, which the bridge skips unless one is included by entity ID.
 """
 
 from __future__ import annotations

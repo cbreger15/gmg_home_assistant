@@ -201,6 +201,7 @@ class GmgConfigBlockSensor(GmgConfigEntity, SensorEntity):
     _attr_name = "Config Block"
     _attr_icon = "mdi:barcode"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _decodes_the_block = False  # raw bytes are worth seeing on any API version
 
     def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
         super().__init__(coordinator, "config_block")

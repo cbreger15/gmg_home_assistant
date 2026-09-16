@@ -5,7 +5,7 @@ from __future__ import annotations
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import ATTR_CONFIG, DOMAIN
+from .const import ATTR_CONFIG, CONFIG_WRITE_API_VERSIONS, DOMAIN
 from .coordinator import GmgDataUpdateCoordinator
 from .gmg import GrillConfig
 
@@ -31,8 +31,13 @@ class GmgConfigEntity(GmgEntity):
     """An entity for the GMG app's Grill Config screen (status bytes 8-15).
 
     Unavailable until the grill has sent one whole status packet -- the only
-    kind the block is read from (see const.STATUS_PACKET_BYTES).
+    kind the block is read from (see const.STATUS_PACKET_BYTES). A control
+    also needs a grill on a config API version whose layout is confirmed:
+    elsewhere it would show a guess and every change would be refused.
     """
+
+    # False for entities that show the raw block rather than decode it.
+    _decodes_the_block = True
 
     def __init__(self, coordinator: GmgDataUpdateCoordinator, key: str) -> None:
         super().__init__(coordinator)
@@ -44,4 +49,7 @@ class GmgConfigEntity(GmgEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self.config is not None
+        config = self.config
+        if not super().available or config is None:
+            return False
+        return not self._decodes_the_block or config.api_version in CONFIG_WRITE_API_VERSIONS

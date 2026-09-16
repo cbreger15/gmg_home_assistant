@@ -5,6 +5,8 @@ gmg.Grill, so a switch or select drives the real read-change-write-confirm
 sequence. Needs pytest-homeassistant-custom-component (requirements.test.txt).
 """
 
+import asyncio
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -23,11 +25,26 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
-from custom_components.gmg.const import CONF_IP, CONF_SERIAL_NUMBER, DOMAIN
+from custom_components.gmg import gmg
+from custom_components.gmg.const import CONF_IP, CONF_SERIAL_NUMBER, CONFIG_READ_ATTEMPTS, DOMAIN
 from custom_components.gmg.gmg import Grill
-from tests.grill_wire import LIVE, MERGED_104, TAIL_CUT_51, WireGrill
+from tests.grill_wire import (
+    LIVE,
+    MERGED_104,
+    STATUS,
+    TAIL_CUT_51,
+    TEST_IP,
+    NoNetwork,
+    WireGrill,
+)
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
+
+
+@pytest.fixture(autouse=True)
+def no_real_grill(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any send that gets past WireGrill fails the test instead of leaving the machine."""
+    monkeypatch.setattr(gmg, "socket", NoNetwork())
 
 SERIAL = "GMG12272191"
 PIZZA = "switch.green_mountain_grill_gmg12272191_pizza_mode"
@@ -44,7 +61,7 @@ async def _set_up(hass: HomeAssistant, wire: WireGrill) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id=SERIAL,
-        data={CONF_IP: "10.0.0.94", CONF_SERIAL_NUMBER: SERIAL},
+        data={CONF_IP: TEST_IP, CONF_SERIAL_NUMBER: SERIAL},
     )
     entry.add_to_hass(hass)
 
@@ -93,8 +110,9 @@ async def test_the_controls_show_the_grill_settings(hass: HomeAssistant) -> None
 
 
 async def test_only_pizza_mode_is_a_user_facing_control(hass: HomeAssistant) -> None:
-    """The HomeKit bridge never publishes an entity with an entity_category, so
-    this decides what reaches Apple Home: Pizza Mode, and nothing else."""
+    """The HomeKit bridge skips an entity with an entity_category unless it is
+    included by entity ID, so this decides what reaches Apple Home by
+    default: Pizza Mode, and nothing else."""
     await _set_up(hass, WireGrill(LIVE["09"]))
     registry = er.async_get(hass)
 
@@ -164,12 +182,76 @@ async def test_a_write_that_does_not_take_is_reported(hass: HomeAssistant) -> No
 async def test_nothing_is_written_when_the_grill_cannot_be_read(hass: HomeAssistant) -> None:
     wire = WireGrill(LIVE["09"])
     await _set_up(hass, wire)
-    wire.script = [None, TAIL_CUT_51, None, MERGED_104, None]
+    wire.script = ([None, TAIL_CUT_51, MERGED_104] * CONFIG_READ_ATTEMPTS)[:CONFIG_READ_ATTEMPTS]
 
-    with pytest.raises(HomeAssistantError, match="pizza_mode.*no usable status"):
+    with pytest.raises(HomeAssistantError, match="pizza_mode.*Nothing was sent"):
         await _call(hass, "switch", "turn_on", PIZZA)
 
     assert wire.writes() == []
+
+
+async def test_a_failed_write_shows_what_the_grill_now_reports(hass: HomeAssistant) -> None:
+    # The grill takes the frame but lands Auto-Revert WiFi on as well.
+    wire = WireGrill(LIVE["09"], apply=lambda block: block[:1] + bytes([block[1] | 0x02]) + block[2:])
+    await _set_up(hass, wire)
+
+    with pytest.raises(HomeAssistantError, match="pizza_mode.*something other than"):
+        await _call(hass, "switch", "turn_on", PIZZA)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(BLOCK).state == "06 2b 14 32 19 19 19 19"
+    assert hass.states.get(AUTO_REVERT).state == STATE_ON
+
+
+async def test_polls_wait_while_a_write_is_in_progress(hass: HomeAssistant) -> None:
+    """A poll that read the grill before the write, and finished after it,
+    would put the old block back on screen."""
+    wire = WireGrill(LIVE["09"])
+    entry = await _set_up(hass, wire)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    frame_sent, release = threading.Event(), threading.Event()
+    wire_send = coordinator.grill.send
+
+    def send_holding_the_frame(message: bytes, timeout: float = 1):
+        reply = wire_send(message, timeout)
+        if message[:2] == b"UC":
+            frame_sent.set()
+            assert release.wait(5)
+        return reply
+
+    coordinator.grill.send = send_holding_the_frame
+    write = hass.async_create_task(_call(hass, "switch", "turn_on", PIZZA))
+    assert await hass.async_add_executor_job(frame_sent.wait, 5)
+
+    polls = wire.sent().count(STATUS)
+    refresh = hass.async_create_task(coordinator.async_refresh())
+    await asyncio.sleep(0.2)
+    assert wire.sent().count(STATUS) == polls, "a poll ran while the write was in progress"
+
+    release.set()
+    await write
+    await refresh
+    await hass.async_block_till_done()
+
+    assert hass.states.get(PIZZA).state == STATE_ON
+    assert hass.states.get(BLOCK).state == "06 29 14 32 19 19 19 19"
+
+
+async def test_an_unverified_api_version_shows_the_block_but_offers_no_controls(
+    hass: HomeAssistant,
+) -> None:
+    """Byte 9's layout is only confirmed on API version 6; elsewhere the
+    switches would show guesses and every toggle would be refused."""
+    packet = bytearray(LIVE["09"])
+    packet[8] = 5
+    await _set_up(hass, WireGrill(bytes(packet)))
+
+    for entity_id in (PIZZA, AUTO_REVERT, LOCK, CLIMATE_SETTING):
+        assert hass.states.get(entity_id).state == STATE_UNAVAILABLE, entity_id
+    block = hass.states.get(BLOCK)
+    assert block.state == "05 09 14 32 19 19 19 19"
+    assert block.attributes["api_version"] == 5
 
 
 async def test_settings_keep_their_last_value_across_cut_and_merged_replies(

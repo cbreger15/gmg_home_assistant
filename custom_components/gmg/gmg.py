@@ -31,8 +31,10 @@ import time
 
 from .const import (
     CLIMATE_SETTINGS,
+    CONFIG_CONFIRM_FIRST_DELAY,
     CONFIG_CONFIRM_INTERVAL,
     CONFIG_CONFIRM_POLLS,
+    CONFIG_READ_ATTEMPTS,
     CONFIG_WRITE_API_VERSIONS,
     MAX_STATUS_RETRIES,
     MIN_STATUS_BYTES,
@@ -99,13 +101,25 @@ class ConfigField:
     width: int  # bits
     max_value: int  # highest value the app offers
 
+    def __post_init__(self) -> None:
+        block_len = CONFIG_BLOCK.stop - CONFIG_BLOCK.start
+        if not (
+            0 <= self.index < block_len
+            and self.shift >= 0
+            and self.width >= 1
+            and self.shift + self.width <= 8
+            and 0 < self.max_value < 1 << self.width
+        ):
+            raise ValueError(f"{self.name} does not fit its bits: {self}")
+
     @property
     def mask(self) -> int:
         return ((1 << self.width) - 1) << self.shift
 
     def validate(self, value: int) -> None:
-        if not 0 <= value <= self.max_value:
-            raise ValueError(f"{self.name} must be 0-{self.max_value}, got {value}")
+        # bool is an int, and True/False are fine for a one-bit field.
+        if not isinstance(value, int) or not 0 <= value <= self.max_value:
+            raise ValueError(f"{self.name} must be a whole number 0-{self.max_value}, got {value!r}")
 
 
 # Status byte 9, decoded on a Jim Bowie (firmware 2.3, APIv6) on 16 Sep 2026 by
@@ -200,6 +214,19 @@ class GrillConfig:
         return (self.block[6], self.block[7])
 
 
+# One config write per grill at a time -- per address, not per Grill object:
+# reloading the integration makes a new Grill while the old one may still be
+# confirming a write, and each write reads the block, changes one field and
+# writes all eight bytes back, so two at once would undo each other.
+_CONFIG_WRITE_LOCKS: dict[str, threading.Lock] = {}
+_CONFIG_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def _config_write_lock(ip: str) -> threading.Lock:
+    with _CONFIG_WRITE_LOCKS_GUARD:
+        return _CONFIG_WRITE_LOCKS.setdefault(ip, threading.Lock())
+
+
 def discover_grills(timeout: float = 2, ip_bind_address: str = "0.0.0.0") -> list["Grill"]:
     """Broadcast for grills on every local interface and return what answered.
 
@@ -263,9 +290,7 @@ class Grill:
 
         self._ip = ip
         self._serial_number = serial_number
-        # One config write at a time: each reads the block, changes one field
-        # and writes all eight bytes back, so two at once would undo each other.
-        self._config_lock = threading.Lock()
+        self._config_lock = _config_write_lock(ip)
 
     @property
     def ip(self) -> str:
@@ -316,12 +341,6 @@ class Grill:
         and the grill reads as "on" at 601F. The UR prefix is what proves the
         offsets are right (see STATUS_PREFIX).
         """
-        return self._poll_status(
-            is_status_reply, f"{MIN_STATUS_BYTES}+ bytes starting {STATUS_PREFIX!r}"
-        )
-
-    def _poll_status(self, usable, need: str) -> dict:
-        """Poll until a reply passes `usable`; `need` describes it for the error."""
         attempts = 0
         last_bad = None
 
@@ -332,7 +351,7 @@ class Grill:
             if response is None:
                 continue
 
-            if usable(response):
+            if is_status_reply(response):
                 return self._parse_status(response)
 
             # Arrived, but cannot be read. Worth a debug line rather than
@@ -351,7 +370,8 @@ class Grill:
             raise GmgCommunicationError(
                 f"Grill {self._ip} returned no usable status response in "
                 f"{MAX_STATUS_RETRIES} attempts; last was {len(last_bad)} "
-                f"bytes, need {need}: {last_bad!r}"
+                f"bytes, need {MIN_STATUS_BYTES} starting {STATUS_PREFIX!r}: "
+                f"{last_bad!r}"
             )
 
         raise GmgCommunicationError(
@@ -365,27 +385,28 @@ class Grill:
         block as the grill holds it right now -- never a remembered or default
         copy, which would silently undo anything changed in the GMG app since.
 
-        1. Read a whole status packet. If none arrives, nothing is sent.
+        1. Read the block until two whole status packets agree on it. If they
+           never do, nothing is sent.
         2. Refuse a grill whose config API version is not verified.
         3. Change `field` in that block. If it already has `value`, stop.
-        4. Send UC + block + ! once. A write that did not land is reported,
+        4. Refuse a block containing the command terminator (see below).
+        5. Send UC + block + ! once. A write that did not land is reported,
            never repeated.
-        5. Read the block back every CONFIG_CONFIRM_INTERVAL seconds. The grill
-           reporting exactly the block sent is success; any other change fails
-           at once; no change fails after CONFIG_CONFIRM_POLLS reads.
+        6. Read the block back, first after CONFIG_CONFIRM_FIRST_DELAY and then
+           every CONFIG_CONFIRM_INTERVAL. The grill reporting exactly the block
+           sent is success; any other change fails at once; no change fails
+           after CONFIG_CONFIRM_POLLS reads.
 
         Returns the status that confirmed it. Raises ValueError for a value
         the app does not offer (before any I/O), GmgCommunicationError if the
         grill cannot be read, GmgConfigWriteError for a refusal or a failed
-        write. Blocking for up to ~30 s -- run it in the executor.
+        write. Blocking: a few seconds normally, up to about a minute when the
+        grill stops answering -- run it in the executor.
         """
         field.validate(value)
 
         with self._config_lock:
-            current = self._poll_status(
-                is_full_status_reply,
-                f"exactly {STATUS_PACKET_BYTES} bytes starting {STATUS_PREFIX!r}",
-            )
+            current = self._read_agreed_config()
             before: GrillConfig = current["config"]
 
             if before.api_version not in CONFIG_WRITE_API_VERSIONS:
@@ -400,6 +421,22 @@ class Grill:
                 return current
 
             expected = before.with_field(field, value)
+
+            # Every command ends with "!" (0x21), and a byte of a block can be
+            # 0x21 too -- Icy with Pizza Mode and Lock Temp Display on and
+            # Auto-Revert WiFi off is exactly that. Whether the grill reads such
+            # a frame whole or stops at that byte has not been seen, and a
+            # write cut short could scramble the calibration bytes. The GMG app
+            # can make the change; setting a calibration box to +8 there (0x21
+            # if the zero is 25) and reading the block back would settle it.
+            if b"!" in expected.block:
+                raise GmgConfigWriteError(
+                    f"Grill {self._ip}: the new block {expected} contains 0x21, the "
+                    f"'!' that ends a command, and whether the grill reads such a "
+                    f"write whole is not yet known. Nothing was sent; make this "
+                    f"change in the GMG app."
+                )
+
             _LOGGER.info(
                 "Grill %s: setting %s to %s, config block %s -> %s",
                 self._ip,
@@ -413,12 +450,69 @@ class Grill:
 
             return self._confirm_config(before, expected)
 
+    def _read_agreed_config(self) -> dict:
+        """The latest status, once two whole packets in a row agree on the block.
+
+        One packet is not enough to write from. The read-back after a write
+        cannot catch a bad starting block -- the grill faithfully reports
+        whatever it was sent -- and this link delivers replies held back from
+        earlier requests (two whole replies have arrived as one datagram), so
+        a single whole-looking packet can be stale or spliced. Pieces of
+        replies in between are skipped, not counted as disagreement.
+        """
+        previous = None
+        disagreement = None
+        last_bad = None
+
+        for _ in range(CONFIG_READ_ATTEMPTS):
+            response = self.send(CODE_STATUS)
+            if response is None:
+                continue
+            if not is_full_status_reply(response):
+                last_bad = response
+                continue
+
+            status = self._parse_status(response)
+            if previous is not None:
+                if status["config"] == previous["config"]:
+                    return status
+                disagreement = (previous["config"], status["config"])
+                _LOGGER.debug(
+                    "Grill %s: config block %s then %s, reading again",
+                    self._ip,
+                    *disagreement,
+                )
+            previous = status
+
+        if previous is None:
+            detail = (
+                f"the last reply was {len(last_bad)} bytes: {last_bad!r}"
+                if last_bad is not None
+                else "no reply at all"
+            )
+            raise GmgCommunicationError(
+                f"Grill {self._ip} sent no whole status packet (exactly "
+                f"{STATUS_PACKET_BYTES} bytes starting {STATUS_PREFIX!r}) in "
+                f"{CONFIG_READ_ATTEMPTS} attempts; {detail}. Nothing was sent."
+            )
+        if disagreement is None:
+            raise GmgCommunicationError(
+                f"Grill {self._ip} sent only one whole status packet in "
+                f"{CONFIG_READ_ATTEMPTS} attempts, and a write needs two that agree. "
+                f"Nothing was sent."
+            )
+        raise GmgConfigWriteError(
+            f"Grill {self._ip} never sent two whole status packets in a row with "
+            f"the same config block in {CONFIG_READ_ATTEMPTS} attempts (the last "
+            f"two read {disagreement[0]}, then {disagreement[1]}), so its current "
+            f"settings are uncertain. Nothing was sent."
+        )
+
     def _confirm_config(self, before: GrillConfig, expected: GrillConfig) -> dict:
-        waited = CONFIG_CONFIRM_POLLS * CONFIG_CONFIRM_INTERVAL
         seen = None
 
-        for _ in range(CONFIG_CONFIRM_POLLS):
-            self._sleep(CONFIG_CONFIRM_INTERVAL)
+        for poll in range(CONFIG_CONFIRM_POLLS):
+            self._sleep(CONFIG_CONFIRM_FIRST_DELAY if poll == 0 else CONFIG_CONFIRM_INTERVAL)
             response = self.send(CODE_STATUS)
             if response is None or not is_full_status_reply(response):
                 continue
@@ -436,15 +530,17 @@ class Grill:
                     f"which can restore any setting."
                 )
 
+        reads = f"{CONFIG_CONFIRM_POLLS} read-backs"
         if seen is None:
             raise GmgConfigWriteError(
-                f"Grill {self._ip} sent no whole status packet in {waited} s after a "
+                f"Grill {self._ip} sent no whole status packet in {reads} after a "
                 f"write of {expected}, so the result is unknown (it was {before}). "
                 f"Check Grill Config in the GMG app."
             )
         raise GmgConfigWriteError(
-            f"Grill {self._ip} still reports config block {seen} {waited} s after a "
-            f"write of {expected}: the change did not take, and was not repeated."
+            f"Grill {self._ip} still reports config block {seen} after {reads} "
+            f"following a write of {expected}: the change did not take, and was "
+            f"not repeated."
         )
 
     def serial(self) -> str:

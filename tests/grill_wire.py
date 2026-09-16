@@ -3,10 +3,30 @@
 Real replies from a Jim Bowie (firmware 2.3, "NJB APIv6"), taken from Home
 Assistant's history of the raw status sensor between 13 and 16 Sep 2026, and
 WireGrill, which answers Grill.send with them. Plain Python: no Home Assistant
-and no network needed.
+and no network needed -- and NoNetwork makes sure of the second part.
 """
 
+import socket as _socket
 import threading
+
+# Test addresses are from TEST-NET-1 (RFC 5737), which is never routed.
+TEST_IP = "192.0.2.94"
+
+
+class NoNetwork:
+    """Stands in for the `socket` module inside gmg.py during tests.
+
+    Everything passes through except opening a socket, which fails the test.
+    Tests must reach the grill through WireGrill; if a change ever routes a
+    send around it, that must be a failing test, not a UDP frame on the LAN.
+    """
+
+    def __getattr__(self, name):
+        return getattr(_socket, name)
+
+    @staticmethod
+    def socket(*args, **kwargs):
+        raise AssertionError("a test tried to open a real socket -- simulate the grill instead")
 
 STATUS = b"UR001!"
 LIVE_REPLY = object()  # in a WireGrill script: answer with the current packet

@@ -49,6 +49,15 @@ except ImportError:
     _const = _load("custom_components.gmg.const", "const.py")
     _gmg = _load("custom_components.gmg.gmg", "gmg.py")
 
+try:
+    from tests.grill_wire import TEST_IP, NoNetwork
+except ImportError:  # run directly: tests/ itself is on sys.path
+    from grill_wire import TEST_IP, NoNetwork
+
+# No test here may reach a real grill: every Grill.send below is replaced,
+# and anything that slips past that fails instead of sending.
+_gmg.socket = NoNetwork()
+
 Grill = _gmg.Grill
 GmgCommunicationError = _gmg.GmgCommunicationError
 
@@ -140,7 +149,7 @@ def test_short_response_raises_instead_of_hanging_or_crashing():
 def test_status_retries_a_short_response_then_succeeds():
     """The regression this fork exists to fix: a short payload must be
     retried, not raised on. Two short reads then a good one is a success."""
-    g = Grill("10.0.0.1", "TEST")
+    g = Grill(TEST_IP, "TEST")
     replies = [b"UR", b"URfoo", POWER_ON_COLD_SMOKE]
     calls = []
 
@@ -159,7 +168,7 @@ def test_status_gives_up_after_all_short_and_says_so():
     """It must still fail eventually, and the message must name the length --
     a grill returning a CONSISTENT short payload is a protocol difference,
     not a blip, and the error is the only place that would show it."""
-    g = Grill("10.0.0.1", "TEST")
+    g = Grill(TEST_IP, "TEST")
     calls = []
 
     def fake_send(message, timeout=1):
@@ -183,7 +192,7 @@ def test_status_retries_a_reply_that_lost_its_first_bytes():
     """The phantom-cook regression: a reply that does not start with UR is
     read at the wrong offsets, so it must be retried like a short one --
     never parsed into 'on at 601F'."""
-    g = Grill("10.0.0.1", "TEST")
+    g = Grill(TEST_IP, "TEST")
     replies = [HEAD_CUT, POWER_OFF]
     calls = []
 
@@ -199,7 +208,7 @@ def test_status_retries_a_reply_that_lost_its_first_bytes():
 
 
 def test_status_gives_up_after_all_headless_and_says_so():
-    g = Grill("10.0.0.1", "TEST")
+    g = Grill(TEST_IP, "TEST")
     calls = []
 
     def fake_send(message, timeout=1):
@@ -226,11 +235,33 @@ def test_parse_status_refuses_a_reply_that_does_not_start_with_ur():
     assert raised, "a reply without the UR prefix must never be parsed"
 
 
+def test_a_whole_length_reply_without_the_prefix_is_still_refused():
+    # The right length is not enough: this is a whole reply rotated by one byte.
+    rotated = MERGED[1:53]
+    assert len(rotated) == 52
+    g = Grill(TEST_IP, "TEST")
+    replies = [rotated, POWER_OFF]
+    calls = []
+    g.send = lambda msg, timeout=1: calls.append(msg) or replies[len(calls) - 1]
+    state = g.status()
+    assert len(calls) == 2, "a 52-byte reply that does not start UR must be retried"
+    assert state["temp"] == 102
+
+
+def test_tests_cannot_reach_a_real_grill():
+    try:
+        Grill(TEST_IP, "TEST").send(b"UR001!")
+        raised = False
+    except AssertionError:
+        raised = True
+    assert raised, "the NoNetwork guard must stop a real send"
+
+
 def test_status_still_reads_tail_cut_and_merged_replies():
     """Only the head matters for the status fields: a reply that kept its
     UR prefix has every field at its proper offset, however it ends."""
     for reply in (TAIL_CUT, MERGED):
-        g = Grill("10.0.0.1", "TEST")
+        g = Grill(TEST_IP, "TEST")
         calls = []
         g.send = lambda msg, timeout=1, reply=reply: calls.append(msg) or reply
         state = g.status()
@@ -275,7 +306,7 @@ def test_combine_temp_matches_hand_computation():
 
 
 def test_set_temp_command_bytes():
-    g = Grill("10.0.0.1", "TEST")
+    g = Grill(TEST_IP, "TEST")
     calls = []
     g.send = lambda msg, timeout=1: calls.append(msg) or b""
     g.set_temp(350)
@@ -283,7 +314,7 @@ def test_set_temp_command_bytes():
 
 
 def test_set_temp_probe_command_bytes():
-    g = Grill("10.0.0.1", "TEST")
+    g = Grill(TEST_IP, "TEST")
     calls = []
     g.send = lambda msg, timeout=1: calls.append(msg) or b""
     g.set_temp_probe(165, probe_number=1)
@@ -294,7 +325,7 @@ def test_set_temp_probe_command_bytes():
 def test_probe_targets_under_100_are_zero_padded():
     """Every other implementation sends UF%03d!, and the Aenima4six2 emulator
     only recognises UF(\\d{3})! -- so UF32! may never register at all."""
-    g = Grill("10.0.0.1", "TEST")
+    g = Grill(TEST_IP, "TEST")
     calls = []
     g.send = lambda msg, timeout=1: calls.append(msg) or b""
     g.set_temp_probe(32, probe_number=1)
@@ -303,7 +334,7 @@ def test_probe_targets_under_100_are_zero_padded():
 
 
 def test_power_commands_match_reference_project():
-    g = Grill("10.0.0.1", "TEST")
+    g = Grill(TEST_IP, "TEST")
     calls = []
     g.send = lambda msg, timeout=1: calls.append(msg) or b""
     g.power_on()
@@ -313,7 +344,7 @@ def test_power_commands_match_reference_project():
 
 
 def test_set_temp_rejects_out_of_range():
-    g = Grill("10.0.0.1", "TEST")
+    g = Grill(TEST_IP, "TEST")
     for bad in (100, 501):
         try:
             g.set_temp(bad)
@@ -324,7 +355,7 @@ def test_set_temp_rejects_out_of_range():
 
 
 def test_firmware_command_and_parsing():
-    g = Grill("10.0.0.1", "TEST")
+    g = Grill(TEST_IP, "TEST")
     # Exact response format is unconfirmed (see gmg.py's firmware() docstring) --
     # this only tests what firmware() actually does: decode and strip
     # whitespace, not a specific real value.
@@ -346,28 +377,7 @@ def test_is_probe_connected_boundaries():
 
 
 if __name__ == "__main__":
-    tests = [
-        test_power_off,
-        test_power_on_cold_smoke,
-        test_short_response_raises_instead_of_hanging_or_crashing,
-        test_combine_temp_matches_hand_computation,
-        test_set_temp_command_bytes,
-        test_set_temp_probe_command_bytes,
-        test_probe_targets_under_100_are_zero_padded,
-        test_power_commands_match_reference_project,
-        test_set_temp_rejects_out_of_range,
-        test_firmware_command_and_parsing,
-        test_is_probe_connected_boundaries,
-        test_status_retries_a_short_response_then_succeeds,
-        test_status_gives_up_after_all_short_and_says_so,
-        test_status_retries_a_reply_that_lost_its_first_bytes,
-        test_status_gives_up_after_all_headless_and_says_so,
-        test_parse_status_refuses_a_reply_that_does_not_start_with_ur,
-        test_status_still_reads_tail_cut_and_merged_replies,
-        test_low_pellet_warning_from_a_real_capture,
-        test_warnings_are_flags_so_simultaneous_ones_all_show,
-        test_warning_bits_without_a_name_are_still_reported,
-    ]
+    tests = [value for name, value in list(globals().items()) if name.startswith("test_")]
     for t in tests:
         t()
         print(f"{t.__name__}: PASS")

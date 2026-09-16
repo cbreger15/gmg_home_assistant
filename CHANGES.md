@@ -24,29 +24,37 @@ and reading the reply back:
 - **New entities.** **Pizza Mode** (switch) is an ordinary control, so Home
   Assistant's HomeKit bridge can publish it. **Climate Setting** (select),
   **Auto-Revert WiFi** and **Lock Temp Display** (switches) are config
-  entities, which the bridge never publishes. **Config Block** (diagnostic
-  sensor) shows the eight bytes as hex, with the API version and the six
-  calibration bytes as attributes.
+  entities, which the bridge skips unless one is included by entity ID.
+  **Config Block** (diagnostic sensor) shows the eight bytes as hex, with the
+  API version and the six calibration bytes as attributes.
 - **How a write works.** The only documented write is `UC` + the 8 bytes +
   `!`, from [facultymatt/gmg-js](https://github.com/facultymatt/gmg-js) (2020),
   whose notes record whole frames and whose author said it "used to work".
   A write replaces all eight bytes, so `Grill.write_config_field` never
   sends a remembered or default block. It:
-  1. reads a whole status packet from the grill -- nothing is sent if none
-     arrives;
+  1. reads the grill until **two whole status packets in a row agree** on the
+     block -- nothing is sent if they never do. One packet is not enough: the
+     read-back in step 6 cannot catch a bad starting block (the grill reports
+     whatever it was sent), and this link delivers replies held back from
+     earlier requests;
   2. refuses any grill that doesn't report API version 6, the only version
      the layout is confirmed on;
   3. changes that one field's bits, and does nothing if they already match;
-  4. sends the frame **once** -- a write that did not land is reported, never
+  4. refuses a new block containing `0x21`, the `!` that ends every command
+     (see Known gaps);
+  5. sends the frame **once** -- a write that did not land is reported, never
      repeated;
-  5. reads the block back every 2 s for up to 30 s. The exact block sent is
-     success. Any other change fails at once, with the before / sent / now
-     blocks in the error so the GMG app can put things back. No change at all
-     fails at 30 s.
+  6. reads the block back after 0.5 s, then every 2 s, 15 times in all. The
+     exact block sent is success. Any other change fails at once, with the
+     before / sent / now blocks in the error so the GMG app can put things
+     back. No change at all fails after the last read -- about 30 s, or up to
+     a minute if the grill has stopped answering.
 
-  Writes are serialised, so two quick toggles cannot both start from the
-  same block and undo each other. A failure shows in Home Assistant as an
-  error on the toggle or the automation step.
+  Writes to a grill take turns -- also across an integration reload -- so
+  two quick toggles cannot both start from the same block and undo each
+  other, and Home Assistant's own polling waits while a write is in
+  progress. A failure shows as an error on the toggle or the automation step,
+  and is logged.
 - **gmg-js's own Pizza Mode write had a bug** that this avoids: it overwrote
   the whole top nibble of byte 9, which also clears bit 4 and silently drops
   a grill on Hot to Icy. Its other numbers agree once the fields are split --
@@ -63,7 +71,9 @@ and reading the reply back:
   replies arrive too, and a misaligned byte 9 can read as Pizza Mode ON.
   Between whole packets the entities keep showing the last whole block --
   for display only; a write always reads the grill first. On grills that
-  send 36-byte replies, the Grill Config entities stay unavailable.
+  send 36-byte replies, the Grill Config entities stay unavailable. On a
+  grill whose API version isn't 6, only Config Block is available: the
+  controls would be showing an unconfirmed decode, and could not write.
 - **Warning** (binary sensor) now lists which warnings are set, in a
   `warnings` attribute, plus the raw code (see below).
 
@@ -77,8 +87,10 @@ and reading the reply back:
   like `unknown_85`, and a cold grill "on": 12 of the 21 off-to-on changes it
   recorded in 10 days were one bad reply, not a cook. A reply must now start
   `UR` to be read, and is otherwise retried like a short one. A reply cut at
-  the end, or two run together, still starts `UR` with every field in place,
-  so those are still read.
+  the end, or two run together, still starts `UR`, and every piece captured
+  so far kept its bytes in order, so its status fields sit where they belong
+  and it is still read. (A reply missing bytes from its middle would not be
+  caught; none has been seen.)
 - **Probe targets under 100F were sent unpadded.** `UF32!` is now `UF032!`
   (and `Uf` for probe 2), as every other implementation sends them; the
   Aenima4six2 emulator only recognises `UF(\d{3})!`. `UT` is padded the same
@@ -95,6 +107,10 @@ and reading the reply back:
   because CI only ran the pure-Python file. A new CI job installs Home
   Assistant 2026.9.2's test harness and runs everything, including new
   entity tests that drive the real write path against a simulated grill.
+  Tests use a documentation-only address (192.0.2.x), and any attempt to
+  open a real socket fails the test instead of reaching a grill.
+- **The coordinator passes its config entry explicitly**, as Home Assistant
+  asks, instead of relying on the context it was created in.
 
 ## Fixed in 3.1.2
 
@@ -281,6 +297,17 @@ this project's own original testing notes, not the wire protocol.
   it writes is confirmed on APIv6 by reading; each write is confirmed only by
   reading the block back afterwards, and it is refused on any other API
   version.
+- A write whose new block contains `0x21` is refused. Every command ends with
+  `!` (`0x21`), and whether the grill reads such a frame whole has not been
+  seen. In practice that is Icy with Pizza Mode and Lock Temp Display on and
+  Auto-Revert WiFi off -- and every change at all while any calibration byte
+  reads 33 (probably +8 on a probe box, +13 or -17 on the grill's), since a
+  write sends all eight. Setting a probe box to +8 in the GMG app and reading
+  the block back would show whether the grill takes such a frame -- the app
+  has to send one to make that change.
+- The GMG app writes all eight bytes from its own Grill Config screen too.
+  Pressing Confirm on a screen opened before a change made from Home
+  Assistant puts the old value back; reopen the screen first.
 - Bytes 10-15 (the calibration boxes) are exposed raw and never written: the
   byte-to-box mapping and the zero points are inferred, not confirmed.
 - Whatever's in the currently-undecoded bytes (see Raw Status sensor,

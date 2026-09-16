@@ -93,9 +93,15 @@ MAX_STATUS_RETRIES = 5
 # confirmed on API version 6 only (status byte 8); any other grill is left
 # alone rather than risk scrambling its probe calibration.
 CONFIG_WRITE_API_VERSIONS = frozenset({6})
-# After a write the block is read back every CONFIG_CONFIRM_INTERVAL seconds,
-# at most CONFIG_CONFIRM_POLLS times: 30 s, the same as one scan interval.
+# Before a write, status polls to find two whole replies whose blocks agree.
+CONFIG_READ_ATTEMPTS = 10
+# After a write the block is read back CONFIG_CONFIRM_POLLS times: first after
+# CONFIG_CONFIRM_FIRST_DELAY, then every CONFIG_CONFIRM_INTERVAL -- about 30 s
+# in all. A grill that answers takes a few seconds; one that has stopped
+# answering costs its 1 s timeouts on top, so a failed write can take about a
+# minute to report.
 CONFIG_CONFIRM_POLLS = 15
+CONFIG_CONFIRM_FIRST_DELAY = 0.5  # seconds
 CONFIG_CONFIRM_INTERVAL = 2  # seconds
 
 # The shortest status payload _parse_status can read. It indexes values[33]
@@ -121,7 +127,7 @@ MIN_STATUS_BYTES = 34
 STATUS_PREFIX = b"UR"
 
 # A whole status reply, as a Jim Bowie on firmware 2.3 ("NJB APIv6") sends it.
-# Bytes 36-51 carry the model string ("JB02SUF02.3"). Pieces of a reply and two
+# Bytes 41-51 carry the model string ("JB02SUF02.3"). Pieces of a reply and two
 # replies run together both arrive as well, and a misaligned byte 9 can read as
 # Pizza Mode ON -- so the Grill Config block is only ever read from a reply of
 # exactly this length. Older grills send 36 bytes; they get status, not config.
