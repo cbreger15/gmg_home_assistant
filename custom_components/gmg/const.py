@@ -144,8 +144,9 @@ CLIMATE_SETTINGS = ("Icy", "Cold", "Average", "Warm", "Hot")
 # against this project's own combining math in gmg.py). 601 is outside the
 # probe's real physical range (32-257F), so "outside the physical range"
 # is what's actually checked below, rather than hardcoding 601 as a magic
-# number -- there's no evidence the sentinel is always exactly 601 versus
-# some other always-out-of-range value, and a range check degrades safely
+# number -- and the sentinel is NOT always exactly 601: the grill applies the
+# app's probe calibration to it too. With the 32F boxes at +8 and +4 (16 Sep
+# 2026), the two empty jacks read 584 and 593. A range check degrades safely
 # either way (anything implausible reads as disconnected).
 
 

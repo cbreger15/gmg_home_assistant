@@ -193,9 +193,10 @@ class GmgConfigBlockSensor(GmgConfigEntity, SensorEntity):
 
     The instrument for decoding the rest of it: change one setting in the GMG
     app, and whichever byte moves is that setting. The six calibration bytes
-    are attributes, raw -- which byte is which box, and where each box's zero
-    sits, is inferred rather than confirmed (see gmg.GrillConfig), and a
-    guessed zero point would turn a readout into a wrong one.
+    are attributes, raw: the left boxes' encoding is confirmed, but negative
+    values and the right boxes have not been seen moving (see
+    gmg.GrillConfig), and a guessed decode would turn a readout into a wrong
+    one.
     """
 
     _attr_name = "Config Block"

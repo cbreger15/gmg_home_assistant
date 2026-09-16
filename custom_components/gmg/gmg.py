@@ -59,12 +59,12 @@ CODE_STATUS = b"UR001!"
 # plain text, same as the serial number response), so it's surfaced as-is
 # rather than parsed into structured fields.
 CODE_FIRMWARE = b"UN!"
-# "UC" + the 8-byte config block + "!" -- single-sourced: facultymatt/gmg-js
-# (2020), whose notes record whole frames (5543050b02322020202021, "pizza mode
-# off") and whose author said it "used to work". No other project sends it.
-# The block layout it assumed has since been confirmed on APIv6 by reading
-# (see PIZZA_MODE below); the write itself is confirmed only by
-# Grill.write_config_field reading the block back afterwards, every time.
+# "UC" + the 8-byte config block + "!" -- from facultymatt/gmg-js (2020),
+# whose notes record whole frames (5543050b02322020202021, "pizza mode off")
+# and whose author said it "used to work". No other project sends it.
+# Confirmed on a Jim Bowie (APIv6) on 16 Sep 2026: Pizza Mode on and off from
+# Home Assistant, each read back exactly. Grill.write_config_field still reads
+# the block back after every write.
 CODE_WRITE_CONFIG = b"UC"
 
 
@@ -145,13 +145,14 @@ LOCK_TEMP_DISPLAY = ConfigField("lock_temp_display", index=1, shift=0, width=1, 
 class GrillConfig:
     """The Grill Config block, exactly as the grill sent it.
 
-    Bytes 10-15 are the app's temperature calibration boxes. GMG's support
-    pages say each adjustment has a left box and a right box: the grill's
-    apply at 150F and 500F, each food probe's at 32F and 212F. Which byte is
-    which box, and how a box's value is stored, is NOT confirmed -- the likely
-    reading is "value plus 20 / 50 / 25", since this grill reads 20 50 25 25
-    25 25 while the app shows 0 in every box -- so they are exposed raw and
-    never written.
+    Bytes 10-15 are the app's temperature calibration boxes, a left and a
+    right box per adjustment: the grill's apply at 150F and 500F, each food
+    probe's at 32F and 212F (per GMG's support pages). On 16 Sep 2026 the app
+    set the three left boxes to +2 / +8 / +4 and bytes 10, 12 and 14 read
+    22 / 33 / 29, so a left box is stored as 20 (grill) or 25 (probe) plus the
+    adjustment; the right boxes, at 0, read 50 / 25 / 25. Negative values and
+    non-zero right boxes have not been seen, so these stay raw and are never
+    written.
     """
 
     block: bytes
@@ -200,17 +201,17 @@ class GrillConfig:
 
     @property
     def grill_adjustment_raw(self) -> tuple[int, int]:
-        """Status bytes 10-11, as sent: likely the 150F and 500F boxes."""
+        """Status bytes 10-11, as sent: the grill's 150F and 500F boxes."""
         return (self.block[2], self.block[3])
 
     @property
     def probe1_adjustment_raw(self) -> tuple[int, int]:
-        """Status bytes 12-13, as sent: likely probe 1's 32F and 212F boxes."""
+        """Status bytes 12-13, as sent: probe 1's 32F and 212F boxes."""
         return (self.block[4], self.block[5])
 
     @property
     def probe2_adjustment_raw(self) -> tuple[int, int]:
-        """Status bytes 14-15, as sent: likely probe 2's 32F and 212F boxes."""
+        """Status bytes 14-15, as sent: probe 2's 32F and 212F boxes."""
         return (self.block[6], self.block[7])
 
 
@@ -389,10 +390,12 @@ class Grill:
            never do, nothing is sent.
         2. Refuse a grill whose config API version is not verified.
         3. Change `field` in that block. If it already has `value`, stop.
-        4. Refuse a block containing the command terminator (see below).
-        5. Send UC + block + ! once. A write that did not land is reported,
-           never repeated.
-        6. Read the block back, first after CONFIG_CONFIRM_FIRST_DELAY and then
+        4. Send UC + block + ! once -- whole, even when a byte of the block is
+           itself 0x21, the "!" that ends every command: the grill reads the
+           frame by length (confirmed 16 Sep 2026, when the GMG app wrote
+           06 09 16 32 21 19 1d 19 and every byte landed). A write that did
+           not land is reported, never repeated.
+        5. Read the block back, first after CONFIG_CONFIRM_FIRST_DELAY and then
            every CONFIG_CONFIRM_INTERVAL. The grill reporting exactly the block
            sent is success; any other change fails at once; no change fails
            after CONFIG_CONFIRM_POLLS reads.
@@ -421,22 +424,6 @@ class Grill:
                 return current
 
             expected = before.with_field(field, value)
-
-            # Every command ends with "!" (0x21), and a byte of a block can be
-            # 0x21 too -- Icy with Pizza Mode and Lock Temp Display on and
-            # Auto-Revert WiFi off is exactly that. Whether the grill reads such
-            # a frame whole or stops at that byte has not been seen, and a
-            # write cut short could scramble the calibration bytes. The GMG app
-            # can make the change; setting a calibration box to +8 there (0x21
-            # if the zero is 25) and reading the block back would settle it.
-            if b"!" in expected.block:
-                raise GmgConfigWriteError(
-                    f"Grill {self._ip}: the new block {expected} contains 0x21, the "
-                    f"'!' that ends a command, and whether the grill reads such a "
-                    f"write whole is not yet known. Nothing was sent; make this "
-                    f"change in the GMG app."
-                )
-
             _LOGGER.info(
                 "Grill %s: setting %s to %s, config block %s -> %s",
                 self._ip,
