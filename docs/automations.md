@@ -1,9 +1,9 @@
 # Cooking automations
 
-Five automations for a long cook, ready to paste into `automations.yaml`:
+Five automations for a long cook, plus a small companion for the second, ready to paste into `automations.yaml`:
 
 1. **Stall monitor** -- tells you when the brisket has plateaued and is ready to wrap.
-2. **Hold, then shut down** -- when probe 1 reaches its target, holds at 150°F for 45 minutes, then turns the grill off unless someone has taken over.
+2. **Hold, then shut down** -- when probe 1 reaches its target, holds at 150°F for 45 minutes, then turns the grill off unless someone has taken over. It holds once for each target in a cook, even across a restart. Its companion, 2b, keeps the record of what was held.
 3. **Flameout** -- turns the grill off if it has reported no fire for a minute while set to heat and below 130°F. A real flameout more likely shows as the grill trying to relight, which number 5 watches for; see [what these can and cannot do](#what-these-can-and-cannot-do).
 4. **Possible grease fire** -- turns the grill off and sends a critical alert on a sudden temperature spike above 400°F.
 5. **Fire not lighting** -- sends a critical alert when the grill has been trying to light for 30 minutes and is still below 130°F: an ignition that failed, or a relight after a flameout that isn't taking. It only alerts, and the grill keeps trying.
@@ -22,12 +22,15 @@ check **Settings → Devices & services → Entities** and search for your grill
 | Probe 1 target | `number.green_mountain_grill_gmg12272191_probe_1_target_temperature` |
 | Fire Active (3.3.0) | `binary_sensor.patio_gmg_smoker_fire_active` |
 | Probe 1 Estimated Finish Time (3.3.0) | `sensor.patio_gmg_smoker_probe_1_estimated_finish_time` |
-| Probe 1 rate (the helper below) | `sensor.gmg_probe_1_rate` |
+| Probe 1 rate (the first helper below) | `sensor.gmg_probe_1_rate` |
+| Probe 1 held target (the second helper below) | `input_number.gmg_probe_1_held_target` |
 | Your phone | `notify.mobile_app_chris_iphone` |
 
 The syntax is Home Assistant 2024.10 or later (`triggers:` / `actions:`).
 
-## Before you start: the probe 1 rate helper
+## Before you start: two helpers
+
+### Probe 1 rate
 
 The stall monitor needs probe 1's rate of rise in °F per hour. Create it once:
 
@@ -44,6 +47,18 @@ The stall monitor needs probe 1's rate of rise in °F per hour. Create it once:
    With the time window set, the rate is averaged over the last 15 minutes. The max sub-interval makes the helper recalculate at least once a minute, so a long flat stretch still pulls the rate down.
 
    The grill reports whole degrees. A single 1°F step reads as about 4°F an hour for the 15 minutes it spends in the window. So the stall monitor's "under 2°F an hour for 15 minutes" works out to about half an hour without a one-degree rise.
+
+### Probe 1 held target
+
+The hold announces each target it holds, and 2b stores it here. 2b clears it once the grill has been off for a minute. A Number helper keeps its value through a restart, so a restart can't start a second hold at the same target. (A Text helper made in the UI starts empty after every restart, so it won't do.) Create it once:
+
+1. **Settings → Devices & services → Helpers → Create helper → Number**
+2. Fill in:
+   - **Name:** `GMG Probe 1 Held Target` (this makes `input_number.gmg_probe_1_held_target`)
+   - **Maximum value:** `500`. The default of 100 is too low for a probe target.
+   - Leave the rest as it is.
+
+If the helper is missing, or can't take the target, the hold still works. But a restart mid-cook then makes it forget that it has held, and Home Assistant logs a warning or an error each time 2b can't store the target. See [what these can and cannot do](#what-these-can-and-cannot-do).
 
 ## The automations
 
@@ -102,8 +117,9 @@ The stall monitor needs probe 1's rate of rise in °F per hour. Create it once:
   description: >-
     When probe 1 reaches its target, drop the grill to its 150°F floor. If
     it is still heating at 150°F 45 minutes later, nobody has stepped in, so
-    turn it off. If someone has, leave the grill alone and keep running until
-    it is turned off, so each cook gets one hold.
+    turn it off. If someone has, leave the grill alone. Each target gets one
+    hold per cook: 2b records it in the held-target helper, which keeps it
+    through a restart.
   mode: single
   max_exceeded: silent
   triggers:
@@ -116,7 +132,18 @@ The stall monitor needs probe 1's rate of rise in °F per hour. Create it once:
     - condition: state
       entity_id: climate.green_mountain_grill_gmg12272191
       state: heat
+    - alias: "Not already held at this target this cook"
+      condition: template
+      value_template: >-
+        {{ states('input_number.gmg_probe_1_held_target') | float(0)
+           != states('number.green_mountain_grill_gmg12272191_probe_1_target_temperature') | float(0) }}
   actions:
+    - variables:
+        held: "{{ states('number.green_mountain_grill_gmg12272191_probe_1_target_temperature') | float(0) }}"
+    - alias: "Announce the target, for 2b to remember through a restart"
+      event: gmg_probe_1_held
+      event_data:
+        target: "{{ held }}"
     - alias: "Phase 1: drop to the 150°F holding floor"
       action: climate.set_temperature
       continue_on_error: true
@@ -154,8 +181,11 @@ The stall monitor needs probe 1's rate of rise in °F per hour. Create it once:
                 sound:
                   name: default
               tag: gmg_hold
-        - alias: "One hold per cook: wait for the grill to be turned off"
-          wait_template: "{{ is_state('climate.green_mountain_grill_gmg12272191', 'off') }}"
+        - alias: "One hold per target: wait until the grill is off or probe 1 gets a new target"
+          wait_template: >-
+            {% set target = states('number.green_mountain_grill_gmg12272191_probe_1_target_temperature') %}
+            {{ is_state('climate.green_mountain_grill_gmg12272191', 'off')
+               or (target not in ['unavailable', 'unknown'] and target | float(0) != held) }}
           timeout: "12:00:00"
         - stop: "The grill didn't take the holding setpoint"
     - action: logbook.log
@@ -281,9 +311,48 @@ The stall monitor needs probe 1's rate of rise in °F per hour. Create it once:
                     sound:
                       name: default
                   tag: gmg_hold
-            - alias: "One hold per cook: wait for the grill to be turned off"
-              wait_template: "{{ is_state('climate.green_mountain_grill_gmg12272191', 'off') }}"
+            - alias: "One hold per target: wait until the grill is off or probe 1 gets a new target"
+              wait_template: >-
+                {% set target = states('number.green_mountain_grill_gmg12272191_probe_1_target_temperature') %}
+                {{ is_state('climate.green_mountain_grill_gmg12272191', 'off')
+                   or (target not in ['unavailable', 'unknown'] and target | float(0) != held) }}
               timeout: "12:00:00"
+
+# 2b. REMEMBER WHAT THE HOLD HELD
+- id: gmg_probe_1_hold_record
+  alias: "GMG: Probe 1 hold - remember the held target"
+  description: >-
+    Stores each target the hold announces in the held-target helper, which
+    keeps it through a restart, so the hold can't start twice at the same
+    target. Once the grill has been off for a minute, or when Home Assistant
+    starts with the grill off, the cook is over: clear it, so the next cook
+    can hold at the same target. A separate automation, so a problem with the
+    helper can't stop a hold.
+  mode: queued
+  triggers:
+    - trigger: event
+      event_type: gmg_probe_1_held
+      id: held
+    - trigger: state
+      entity_id: climate.green_mountain_grill_gmg12272191
+      to: "off"
+      for: "00:01:00"
+    - trigger: homeassistant
+      event: start
+  conditions:
+    - condition: or
+      conditions:
+        - condition: trigger
+          id: held
+        - condition: state
+          entity_id: climate.green_mountain_grill_gmg12272191
+          state: "off"
+  actions:
+    - action: input_number.set_value
+      target:
+        entity_id: input_number.gmg_probe_1_held_target
+      data:
+        value: "{{ trigger.event.data.target if trigger.id == 'held' else 0 }}"
 
 # 3. FLAMEOUT
 - id: gmg_flameout
@@ -516,9 +585,12 @@ The stall monitor needs probe 1's rate of rise in °F per hour. Create it once:
   - **Why below 130°F:** one mid-cook return to startup in the log lasted 72 minutes, at 147-150°F. The limit keeps a long recovery like that from counting.
   - **A failed poll starts the 30 minutes again**, so the alert can come later than that.
   - **After a restart:** if Home Assistant starts while the grill is already trying to light below 130°F, this alert stays quiet for that attempt.
-- **The hold runs once per cook.** If someone takes over, or the grill doesn't take the 150°F setpoint, the automation keeps running until the grill is turned off, for up to 12 hours. A failed poll or a replugged probe therefore can't start a second hold.
-  - To hold again sooner, turn the automation off and on (which ends that wait), then run it.
+- **The hold runs once for each target in a cook.** It announces the target it holds, and 2b stores it in the helper. 2b clears the helper once the grill has been off for a minute, or when Home Assistant starts with the grill off. So a failed poll, a replugged probe or a restart can't start a second hold at the same target, but a target you set afterwards gets a hold of its own.
+  - If someone takes over, or the grill doesn't take the 150°F setpoint, the automation keeps running until the grill is turned off or probe 1 gets a new target, for up to 12 hours.
+  - To hold again at the same target, turn the automation off and on (which ends that wait), then run it.
   - If the grill can't be read at the end of the hold, the automation waits up to 10 minutes for it before leaving it on and telling you.
+  - If Home Assistant is down for the whole time the grill is off between two cooks, the helper still holds the first cook's target. A second cook at that same target then gets no hold.
+  - Without a working helper, the hold still works, but a restart mid-cook makes it forget that it has held. The next failed poll with probe 1 still at its target starts it again, which drops the grill to 150°F even if you had taken over.
 - **A restart cancels whatever an automation is waiting for.** If Home Assistant restarts during the 45-minute hold, the grill stays at 150°F until you turn it off. If it restarts during a shutdown check, there's no retry.
 - **The stall alert comes at most once every 4 hours.** The rate helper drops out whenever a poll fails, and without the limit each dropout during a stall would bring another alert.
 - **The grill cannot report what its auger, fan or igniter are doing.** Its status reply has no bits for them, so none of these automations can use them.

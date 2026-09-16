@@ -45,10 +45,10 @@ Temperature readings above 255°F, and cold-smoke mode detection, were both fixe
 
 ## Cooking automations
 
-[docs/automations.md](docs/automations.md) has five automations to paste into `automations.yaml`. They aren't part of the integration.
+[docs/automations.md](docs/automations.md) has five automations to paste into `automations.yaml`, plus a small companion for the hold. They aren't part of the integration.
 
 - **Stall monitor** -- tells you when probe 1 has plateaued. It needs a Derivative helper; the page shows how to set it up.
-- **Hold, then shut down** -- when probe 1 reaches its target, drops the grill to 150°F, then turns it off 45 minutes later unless you've changed the setpoint. One hold per cook.
+- **Hold, then shut down** -- when probe 1 reaches its target, drops the grill to 150°F, then turns it off 45 minutes later unless you've changed the setpoint. It holds once for each target in a cook, even across a Home Assistant restart. Its companion keeps that record in a Number helper, which the page also shows how to set up.
 - **Flameout** -- turns the grill off if it has reported no fire for a minute, and fallen below 130°F, while set to heat. A real flameout more likely shows as the grill trying to relight, which the fire-not-lighting alert watches for.
 - **Possible grease fire** -- while set to heat and above 400°F, a jump of more than 40°F between two readings no more than 60 seconds apart turns the grill off and sends a critical alert.
 - **Fire not lighting** -- a critical alert when the grill has been trying to light for 30 minutes and is still below 130°F: an ignition that failed, or a relight that isn't taking. It only alerts, and the grill keeps trying.

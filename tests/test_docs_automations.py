@@ -1,8 +1,9 @@
 """The automations in docs/automations.md, loaded and driven in Home Assistant.
 
 The YAML is read straight from the document, so the document cannot drift
-from what was tested. Entity states are set by hand and every service the
-automations call is a stand-in, so nothing here reaches a grill or a phone.
+from what was tested. Entity states are set by hand, the hold's held-target
+helper is a real Number helper, and every other service the automations call
+is a stand-in, so nothing here reaches a grill or a phone.
 Needs pytest-homeassistant-custom-component (requirements.test.txt).
 """
 
@@ -19,7 +20,7 @@ from pytest_homeassistant_custom_component.common import (
 )
 import yaml
 
-from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.core import CoreState, HomeAssistant, ServiceCall, callback
 from homeassistant.helpers.template import Template
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
@@ -32,6 +33,11 @@ TARGET = "number.green_mountain_grill_gmg12272191_probe_1_target_temperature"
 FIRE = "binary_sensor.patio_gmg_smoker_fire_active"
 FINISH = "sensor.patio_gmg_smoker_probe_1_estimated_finish_time"
 RATE = "sensor.gmg_probe_1_rate"
+HELD = "input_number.gmg_probe_1_held_target"
+
+# What Home Assistant logs each time 2b writes to a helper that was never
+# created.
+MISSING_HELPER = f"Referenced entities {HELD} are missing or not currently available"
 
 GREASE_FIRE_TEXT = (
     "CRITICAL ALERT: Potential grease fire detected! Smoker has been commanded OFF "
@@ -123,9 +129,22 @@ def _cooking(hass: HomeAssistant, probe: str = "190") -> None:
     hass.states.async_set(TARGET, "203")
 
 
-async def _load(hass: HomeAssistant) -> None:
+async def _load(hass: HomeAssistant, helper: bool = True, maximum: int = 500) -> None:
+    """The page's automations, and the hold's helper as the page says to make
+    it: a Number helper, 0 to 500. `helper=False` is a user who skipped that
+    step; Home Assistant loads the Number integration regardless."""
+    numbers = {"gmg_probe_1_held_target": {"name": "GMG Probe 1 Held Target", "min": 0, "max": maximum}}
+    assert await async_setup_component(hass, "input_number", {"input_number": numbers if helper else {}})
     assert await async_setup_component(hass, "automation", {"automation": _automations()})
     await hass.async_block_till_done()
+
+
+async def _restart(hass: HomeAssistant) -> None:
+    """What a Home Assistant restart does to the automations: every run is
+    cancelled, and every trigger starts again from the states as they are
+    (a template that is already true is not armed). Helpers keep their value."""
+    for service in ("turn_off", "turn_on"):
+        await hass.services.async_call("automation", service, {"entity_id": "all"}, blocking=True)
 
 
 async def _let_run(hass: HomeAssistant) -> None:
@@ -165,12 +184,21 @@ async def _meanwhile(hass: HomeAssistant, freezer, **delta) -> None:
     await _let_run(hass)
 
 
-async def test_all_five_load(hass: HomeAssistant, calls: Calls) -> None:
+async def _after_the_cook(hass: HomeAssistant, freezer) -> None:
+    """The grill has been off for a minute, so 2b clears the held target
+    (and leaves no timer running behind the test)."""
+    await _later(hass, freezer, minutes=1, seconds=1)
+    if held := hass.states.get(HELD):
+        assert held.state == "0.0"
+
+
+async def test_all_six_load(hass: HomeAssistant, calls: Calls) -> None:
     await _load(hass)
     ids = {state.attributes.get("id") for state in hass.states.async_all("automation")}
     assert ids == {
         "gmg_brisket_stall",
         "gmg_probe_1_hold_then_shutdown",
+        "gmg_probe_1_hold_record",
         "gmg_flameout",
         "gmg_grease_fire",
         "gmg_fire_not_lighting",
@@ -260,6 +288,7 @@ async def test_hold_then_shut_down(hass: HomeAssistant, calls: Calls, freezer) -
     await _meanwhile(hass, freezer)
     assert calls["set_temperature"][0].data == {"entity_id": [GRILL], "temperature": 150}
     assert calls["notify"][0].data["title"] == "Probe 1 is done - holding at 150°F"
+    assert hass.states.get(HELD).state == "203.0", "the helper remembers the target"
 
     await _meanwhile(hass, freezer, minutes=44)
     assert calls["turn_off"] == []
@@ -268,6 +297,8 @@ async def test_hold_then_shut_down(hass: HomeAssistant, calls: Calls, freezer) -
     assert calls["turn_off"][0].data == {"entity_id": [GRILL]}
     assert len(calls["turn_off"]) == 1, "the grill read as off at once"
     assert calls["notify"][-1].data["title"] == "Grill shut down after the hold"
+
+    await _after_the_cook(hass, freezer)  # and forgets it once the grill is off
 
 
 @pytest.mark.parametrize(
@@ -303,16 +334,18 @@ async def test_a_hold_changed_by_hand_is_left_alone(
         assert len(calls["notify"]) == 1, "only the hold's own"
 
     _grill(hass, "off", 170)  # the cook ends
-    await _settle(hass)
+    await _after_the_cook(hass, freezer)
 
 
-async def test_one_hold_per_cook(
-    hass: HomeAssistant, calls: Calls, freezer, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("helper", [True, False], ids=["with_helper", "without_helper"])
+async def test_one_hold_per_target_per_cook(
+    hass: HomeAssistant, calls: Calls, freezer, caplog: pytest.LogCaptureFixture, helper: bool
 ) -> None:
     """A failed poll re-arms the trigger: probe 1 and its target read as
-    unavailable, then above the target again."""
+    unavailable, then above the target again. The run still waiting for the
+    grill stops a second hold, so this holds without the helper too."""
     _cooking(hass)
-    await _load(hass)
+    await _load(hass, helper=helper)
 
     hass.states.async_set(PROBE, "203")
     await _meanwhile(hass, freezer)
@@ -329,9 +362,9 @@ async def test_one_hold_per_cook(
 
     assert len(calls["set_temperature"]) == 1, "no second hold"
     assert calls["turn_off"] == []
-    assert _problems(caplog) == [], "and no 'already running' warning either"
+    assert _problems(caplog) == ([] if helper else [MISSING_HELPER]), "and no 'already running' warning"
 
-    # The next cook gets a hold of its own.
+    # The next cook gets a hold of its own, at the same target.
     _grill(hass, "off", 180, setpoint=170)
     await _later(hass, freezer, hours=2)
     _grill(hass, "heat", 225)
@@ -345,14 +378,146 @@ async def test_one_hold_per_cook(
     await _later(hass, freezer, minutes=46)
 
 
-async def test_a_setpoint_the_grill_doesnt_take_is_reported(hass: HomeAssistant, calls: Calls, freezer) -> None:
+@pytest.mark.parametrize(("helper", "holds"), [(True, 1), (False, 2)], ids=["with_helper", "without_helper"])
+async def test_a_restart_mid_cook(
+    hass: HomeAssistant, calls: Calls, freezer, caplog: pytest.LogCaptureFixture, helper: bool, holds: int
+) -> None:
+    """Home Assistant restarts after someone took over from the hold, and then
+    a poll fails. The run that stopped a second hold is gone, but the helper
+    still says 203F was held. Without the helper, the hold starts again and
+    drops the grill to 150F."""
+    _cooking(hass)
+    await _load(hass, helper=helper)
+
+    hass.states.async_set(PROBE, "204")  # a degree past the target by the next poll
+    await _meanwhile(hass, freezer)
+    _grill(hass, "heat", 200, setpoint=250)  # taken over: carry on at 250F
+    await _meanwhile(hass, freezer, minutes=46)
+
+    await _restart(hass)
+    for entity_id in (GRILL, PROBE, TARGET):  # a failed poll
+        hass.states.async_set(entity_id, "unavailable")
+    await _meanwhile(hass, freezer, seconds=30)
+    _grill(hass, "heat", 205, setpoint=250)
+    hass.states.async_set(PROBE, "206")
+    hass.states.async_set(TARGET, "203")
+    await _meanwhile(hass, freezer, minutes=5)
+
+    assert len(calls["set_temperature"]) == holds
+    assert _problems(caplog) == ([] if helper else [MISSING_HELPER] * holds)
+
+    _grill(hass, "off", 180)
+    await _later(hass, freezer, minutes=46)
+
+
+@pytest.mark.parametrize("helper", [True, False], ids=["with_helper", "without_helper"])
+async def test_a_new_target_gets_a_hold_of_its_own(
+    hass: HomeAssistant, calls: Calls, freezer, helper: bool
+) -> None:
+    """Probe 1 was done at 203F; someone took over and asked for 208F."""
+    _cooking(hass)
+    await _load(hass, helper=helper)
+
+    hass.states.async_set(PROBE, "203")
+    await _meanwhile(hass, freezer)
+    _grill(hass, "heat", 200, setpoint=250)  # taken over
+    await _meanwhile(hass, freezer, minutes=46)
+    assert calls["notify"][-1].data["title"] == "Grill left on after the hold"
+
+    hass.states.async_set(TARGET, "208")
+    await _meanwhile(hass, freezer, minutes=20)
+    assert len(calls["set_temperature"]) == 1, "not before probe 1 gets there"
+    hass.states.async_set(PROBE, "208")
+    await _meanwhile(hass, freezer)
+
+    assert len(calls["set_temperature"]) == 2
+    assert calls["notify"][-1].data["title"] == "Probe 1 is done - holding at 150°F"
+    if helper:
+        assert hass.states.get(HELD).state == "208.0"
+
+    _grill(hass, "off", 180)
+    await _later(hass, freezer, minutes=46)
+
+
+async def test_the_held_target_is_forgotten_once_the_grill_is_off(
+    hass: HomeAssistant, calls: Calls, freezer
+) -> None:
     _cooking(hass)
     await _load(hass)
+
+    hass.states.async_set(PROBE, "203")
+    await _meanwhile(hass, freezer)
+    assert hass.states.get(HELD).state == "203.0"
+
+    _grill(hass, "off", 200, setpoint=150)  # one poll reads off
+    await _meanwhile(hass, freezer, seconds=30)
+    _grill(hass, "heat", 200, setpoint=150)
+    await _meanwhile(hass, freezer, minutes=2)
+    assert hass.states.get(HELD).state == "203.0", "not for a single poll"
+
+    _grill(hass, "off", 200, setpoint=150)  # turned off during the hold
+    await _meanwhile(hass, freezer, seconds=59)
+    assert hass.states.get(HELD).state == "203.0", "not before a minute"
+    await _meanwhile(hass, freezer, seconds=2)
+    assert hass.states.get(HELD).state == "0.0"
+
+    await _later(hass, freezer, minutes=45)  # the hold finds the grill off
+
+
+async def test_a_helper_that_cant_take_the_target_doesnt_stop_the_hold(
+    hass: HomeAssistant, calls: Calls, freezer, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The Number helper left at its default maximum of 100."""
+    _cooking(hass)
+    await _load(hass, maximum=100)
+
+    hass.states.async_set(PROBE, "203")
+    await _meanwhile(hass, freezer)
+
+    assert len(calls["set_temperature"]) == 1
+    assert calls["notify"][0].data["title"] == "Probe 1 is done - holding at 150°F"
+    assert hass.states.get(HELD).state == "0.0", "nothing stored"
+    assert any(HELD in problem for problem in _problems(caplog)), "and the log says why"
+
+    await _later(hass, freezer, minutes=46)
+    assert len(calls["turn_off"]) == 1, "the hold went on to the end"
+    await _after_the_cook(hass, freezer)
+
+
+@pytest.mark.parametrize(("mode", "held"), [("off", "0.0"), ("heat", "203.0")], ids=["grill_off", "mid_cook"])
+async def test_a_restart_forgets_the_held_target_only_with_the_grill_off(
+    hass: HomeAssistant, calls: Calls, freezer, mode: str, held: str
+) -> None:
+    """Home Assistant starts with the helper holding the last hold's target,
+    as it keeps it through a restart."""
+    _grill(hass, mode, 180)
+    hass.states.async_set(PROBE, "204")
+    hass.states.async_set(TARGET, "203")
+    assert await async_setup_component(
+        hass, "input_number", {"input_number": {"gmg_probe_1_held_target": {"min": 0, "max": 500, "initial": 203}}}
+    )
+    hass.set_state(CoreState.not_running)
+    await _load(hass)
+    await hass.async_start()
+    await _settle(hass)
+
+    assert hass.states.get(HELD).state == held
+    assert calls["set_temperature"] == [], "and no hold on the way up"
+
+
+@pytest.mark.parametrize("helper", [True, False], ids=["with_helper", "without_helper"])
+async def test_a_setpoint_the_grill_doesnt_take_is_reported(
+    hass: HomeAssistant, calls: Calls, freezer, helper: bool
+) -> None:
+    _cooking(hass)
+    await _load(hass, helper=helper)
     calls.deaf = True  # e.g. the grill is under 150F, where the integration won't change it
 
     hass.states.async_set(PROBE, "203")
     await _meanwhile(hass, freezer)
     assert len(calls["set_temperature"]) == 1
+    if helper:
+        assert hass.states.get(HELD).state == "203.0", "held, even though the grill didn't take it"
     assert calls["notify"] == [], "not before the check"
     await _meanwhile(hass, freezer, seconds=91)
 
@@ -371,11 +536,38 @@ async def test_a_setpoint_the_grill_doesnt_take_is_reported(hass: HomeAssistant,
     hass.states.async_set(PROBE, "204")
     hass.states.async_set(TARGET, "203")
     await _meanwhile(hass, freezer, minutes=5)
-    assert len(calls["set_temperature"]) == 1, "and no second try this cook"
+    assert len(calls["set_temperature"]) == 1, "and no second try at this target"
     assert len(calls["notify"]) == 1
 
     _grill(hass, "off", 180)
-    await _settle(hass)
+    await _after_the_cook(hass, freezer)
+
+
+async def test_a_new_target_after_a_refused_setpoint_gets_its_own_try(
+    hass: HomeAssistant, calls: Calls, freezer
+) -> None:
+    _cooking(hass)
+    await _load(hass)
+    calls.deaf = True
+
+    hass.states.async_set(PROBE, "203")
+    await _meanwhile(hass, freezer, minutes=5)
+    assert calls["notify"][-1].data["title"] == "Probe 1 is done - the grill didn't drop to 150°F"
+
+    hass.states.async_set(TARGET, "208")
+    await _meanwhile(hass, freezer, minutes=20)
+    hass.states.async_set(PROBE, "208")
+    await _meanwhile(hass, freezer)
+
+    assert len(calls["set_temperature"]) == 2
+    assert hass.states.get(HELD).state == "208.0"
+    await _meanwhile(hass, freezer, seconds=91)
+    assert [call.data["title"] for call in calls["notify"]] == [
+        "Probe 1 is done - the grill didn't drop to 150°F"
+    ] * 2
+
+    _grill(hass, "off", 180)
+    await _after_the_cook(hass, freezer)
 
 
 async def test_a_failed_poll_at_the_end_of_the_hold_is_waited_out(
@@ -394,6 +586,7 @@ async def test_a_failed_poll_at_the_end_of_the_hold_is_waited_out(
 
     assert len(calls["turn_off"]) == 1
     assert calls["notify"][-1].data["title"] == "Grill shut down after the hold"
+    await _after_the_cook(hass, freezer)
 
 
 async def test_a_grill_unreadable_at_the_end_of_the_hold_is_reported(
@@ -419,7 +612,7 @@ async def test_a_grill_unreadable_at_the_end_of_the_hold_is_reported(
     )
 
     _grill(hass, "off", 150)  # back, and turned off
-    await _settle(hass)
+    await _after_the_cook(hass, freezer)
 
 
 async def test_a_hold_shutdown_the_grill_doesnt_confirm(hass: HomeAssistant, calls: Calls, freezer) -> None:
@@ -493,6 +686,7 @@ async def test_the_flameout_shutdown(hass: HomeAssistant, calls: Calls, freezer)
     assert alarm["title"] == "GMG ALARM: flameout"
     assert alarm["data"]["push"]["sound"]["critical"] == 1
     assert len(calls["notify"]) == 1
+    await _after_the_cook(hass, freezer)
 
 
 async def test_a_fire_that_dies_below_130_is_a_flameout(
@@ -508,6 +702,7 @@ async def test_a_fire_that_dies_below_130_is_a_flameout(
     await _later(hass, freezer, seconds=30)
 
     assert calls["turn_off"][0].data == {"entity_id": [GRILL]}
+    await _after_the_cook(hass, freezer)
 
 
 async def test_a_flameout_shutdown_the_grill_doesnt_confirm(hass: HomeAssistant, calls: Calls, freezer) -> None:
@@ -606,6 +801,7 @@ async def test_the_grease_fire_shutdown(hass: HomeAssistant, calls: Calls, freez
     assert _text(alert["message"]) == GREASE_FIRE_TEXT
     assert alert["data"]["push"]["sound"]["critical"] == 1
     assert len(calls["notify"]) == 1
+    await _after_the_cook(hass, freezer)
 
 
 async def test_a_grease_fire_shutdown_the_grill_doesnt_confirm(

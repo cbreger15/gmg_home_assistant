@@ -5,6 +5,49 @@ while unblocking it for a current Home Assistant install, not assumed --
 see gmg.py's module docstring for the specifics on what's provably a bug
 versus what's preserved on purpose.
 
+## Changed in the docs after 3.3.0 -- a restart can't start a second hold
+
+The integration itself is unchanged from 3.3.0.
+
+- **The problem.** The hold ran once per cook only because its run stayed
+  alive, waiting for the grill to be turned off, and a restart ends every
+  run. Home Assistant doesn't arm a template trigger that is already true
+  when it starts. So after a restart mid-cook, the next failed poll re-armed
+  the hold, and the poll after it started the hold again while probe 1 was
+  still at its target. The grill dropped to 150F even if someone had taken
+  over, and turned off 45 minutes later unless the setpoint was changed.
+- **The fix.** The hold now announces the target it holds (event
+  `gmg_probe_1_held`). A new companion automation, 2b, stores it in a
+  Number helper, `input_number.gmg_probe_1_held_target`, which keeps its
+  value through a restart. The hold skips a target it has already held.
+  2b clears the record once the grill has been off for a minute, or when
+  Home Assistant starts with the grill off.
+- **Why a Number helper.** A Text helper made in the UI is saved with an
+  empty starting value, so Home Assistant 2026.9 resets it on every restart
+  instead of restoring it.
+- **Why the hold doesn't write the helper itself.** Setting a Number helper
+  above its maximum raises an error that `continue_on_error` doesn't catch,
+  and the helper's default maximum is 100. Written from the hold, a
+  misconfigured helper would stop the hold. From 2b it only logs an error.
+- **A new target gets a hold of its own.** The hold's two long waits (after
+  someone takes over, or after a refused setpoint) now also end when probe 1
+  gets a new target. A failed poll that leaves the target unreadable doesn't
+  end them.
+- **Without the helper,** the hold works as before, and Home Assistant logs
+  a warning each time 2b runs.
+- **Still not covered:** if Home Assistant is down for the whole time the
+  grill is off between two cooks, the second cook gets no hold at the
+  first cook's target.
+- **Tests.** Eleven new cases in `tests/test_docs_automations.py` (48 in
+  all), several of them run both with and without the helper. They cover:
+  - a restart after a take-over, simulated by turning the automations off
+    and on;
+  - a restart with the grill off, and one mid-cook, simulated by starting
+    Home Assistant;
+  - new targets after a take-over and after a refused setpoint;
+  - a one-poll "off", and the one-minute boundary;
+  - a helper whose maximum is too low for the target.
+
 ## Added to the docs after 3.3.0 -- an alert when the fire won't light
 
 The integration itself is unchanged from 3.3.0.
