@@ -9,7 +9,7 @@ from .const import CONF_IP, CONF_SERIAL_NUMBER, DOMAIN
 from .coordinator import GmgDataUpdateCoordinator
 from .gmg import Grill
 
-PLATFORMS = ["climate", "sensor", "binary_sensor", "number"]
+PLATFORMS = ["climate", "sensor", "binary_sensor", "number", "switch", "select"]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

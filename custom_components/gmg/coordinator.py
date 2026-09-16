@@ -13,10 +13,11 @@ from datetime import timedelta
 import logging
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
-from .gmg import Grill, GmgCommunicationError
+from .const import ATTR_CONFIG, DEFAULT_SCAN_INTERVAL, DOMAIN
+from .gmg import ConfigField, Grill, GmgCommunicationError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +37,33 @@ class GmgDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict:
         try:
-            return await self.hass.async_add_executor_job(self.grill.status)
+            data = await self.hass.async_add_executor_job(self.grill.status)
         except GmgCommunicationError as err:
             raise UpdateFailed(str(err)) from err
+
+        # A cut or merged reply still has good status fields but no config
+        # block (see const.STATUS_PACKET_BYTES). The settings did not change
+        # because one reply was cut, so keep showing the last whole packet's
+        # block rather than dropping the Grill Config entities to
+        # unavailable. Display only: a write never uses this copy -- it reads
+        # the grill afresh (gmg.Grill.write_config_field).
+        if data[ATTR_CONFIG] is None and self.data is not None:
+            data[ATTR_CONFIG] = self.data.get(ATTR_CONFIG)
+        return data
+
+    async def async_write_config(self, field: ConfigField, value: int) -> None:
+        """Change one Grill Config setting, and show what the grill reports after.
+
+        Raises HomeAssistantError -- a failed toggle or automation step --
+        when the setting could not be written or did not take.
+        """
+        try:
+            status = await self.hass.async_add_executor_job(
+                self.grill.write_config_field, field, value
+            )
+        except (GmgCommunicationError, ValueError) as err:
+            _LOGGER.error("Could not change %s on the grill: %s", field.name, err)
+            await self.async_request_refresh()
+            raise HomeAssistantError(f"Could not change {field.name} on the grill: {err}") from err
+
+        self.async_set_updated_data(status)

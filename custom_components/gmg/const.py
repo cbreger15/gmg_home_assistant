@@ -20,6 +20,8 @@ ATTR_PROBE2_SET_TEMP = "probe2_set_temp"
 ATTR_FIRE_STATE = "fireState"
 ATTR_FIRE_STATE_PCT = "fireStatePercentage"
 ATTR_WARN_STATE = "warnState"
+ATTR_WARNINGS = "warnings"  # warnState decoded by decode_warnings
+ATTR_CONFIG = "config"  # gmg.GrillConfig, or None -- see STATUS_PACKET_BYTES
 
 # Power state values (raw byte 30). Cross-checked against
 # github.com/brandenco/green-mountain-grill's own reverse-engineering and
@@ -46,12 +48,55 @@ FIRE_STATE_NAMES = {
     198: "cold_smoke",  # confirmed
 }
 
+# warnState (status bytes 24-27), read as one flag per bit.
+#
+# The only real non-zero reading anyone has recorded is low pellets = 128
+# (facultymatt/gmg-js's 2020 capture). The other seven names take the order of
+# brandenco/green-mountain-grill's WarnCode enum, one bit each, with low pellets
+# eighth -- which is how it lands on 128. That part is inference: the
+# Aenima4six2 emulator reads the same eight names as ONE code in steps of 16
+# (16, 32, 48 ... 128), and the two readings agree only on 128. Flags were
+# chosen so that two warnings at once cannot read as neither; treat every name
+# but low_pellet as unconfirmed until a real grill shows one.
+WARN_FLAGS = {
+    1 << 0: "fan_overload",
+    1 << 1: "auger_overload",
+    1 << 2: "ignitor_overload",
+    1 << 3: "low_battery",
+    1 << 4: "fan_disconnect",
+    1 << 5: "auger_disconnect",
+    1 << 6: "ignitor_disconnect",
+    1 << 7: "low_pellet",
+}
+
+
+def decode_warnings(code: int) -> list[str]:
+    """Every warning set in a warnState value, lowest bit first.
+
+    A set bit without a name is reported as unknown_bit_N rather than dropped.
+    """
+    return [
+        WARN_FLAGS.get(1 << bit, f"unknown_bit_{bit}")
+        for bit in range(code.bit_length())
+        if code >> bit & 1
+    ]
+
+
 MIN_TEMP_F = 150
 MAX_TEMP_F = 500
 MIN_TEMP_F_PROBE = 32
 MAX_TEMP_F_PROBE = 257
 
 MAX_STATUS_RETRIES = 5
+
+# Grill Config writes (gmg.Grill.write_config_field). The block layout is
+# confirmed on API version 6 only (status byte 8); any other grill is left
+# alone rather than risk scrambling its probe calibration.
+CONFIG_WRITE_API_VERSIONS = frozenset({6})
+# After a write the block is read back every CONFIG_CONFIRM_INTERVAL seconds,
+# at most CONFIG_CONFIRM_POLLS times: 30 s, the same as one scan interval.
+CONFIG_CONFIRM_POLLS = 15
+CONFIG_CONFIRM_INTERVAL = 2  # seconds
 
 # The shortest status payload _parse_status can read. It indexes values[33]
 # (fireStatePercentage), so anything under 34 bytes cannot be parsed at all.
@@ -62,6 +107,29 @@ MAX_STATUS_RETRIES = 5
 # receive buffer is 1024, and the parser is correct; the grill really does
 # send them. Treat a short response the same way as no response and retry.
 MIN_STATUS_BYTES = 34
+
+# Every status reply starts with these two bytes. A reply that does not has
+# lost its head in transit, and every field after it sits at the wrong offset.
+#
+# Also not hypothetical: on the same install, 54 of 1,768 polls in 48 hours
+# (Sep 2026) came back with their first 1-18 bytes missing. Read at the usual
+# offsets they reported 601F, 2822F and 38402F, fire states like 85, and a
+# grill that was "on" while it sat cold: 12 of the 21 off-to-on changes Home
+# Assistant recorded in 10 days were one bad reply, not a cook. A reply that
+# lost its tail instead keeps every field where it belongs, so the prefix is
+# the check that matters, not the length.
+STATUS_PREFIX = b"UR"
+
+# A whole status reply, as a Jim Bowie on firmware 2.3 ("NJB APIv6") sends it.
+# Bytes 36-51 carry the model string ("JB02SUF02.3"). Pieces of a reply and two
+# replies run together both arrive as well, and a misaligned byte 9 can read as
+# Pizza Mode ON -- so the Grill Config block is only ever read from a reply of
+# exactly this length. Older grills send 36 bytes; they get status, not config.
+STATUS_PACKET_BYTES = 52
+
+# Climate Setting (status byte 9, bits 4-2), in the GMG app's slider order.
+# All five were read back from a real grill on 16 Sep 2026.
+CLIMATE_SETTINGS = ("Icy", "Cold", "Average", "Warm", "Hot")
 
 # A probe jack with nothing plugged in reports a combined value of 601 --
 # confirmed against two independent real captured payloads (both probes,

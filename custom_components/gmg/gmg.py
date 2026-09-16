@@ -22,17 +22,27 @@ flow alone, independent of the protocol's actual byte layout:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import ipaddress
 import logging
 import socket
+import threading
+import time
 
 from .const import (
+    CLIMATE_SETTINGS,
+    CONFIG_CONFIRM_INTERVAL,
+    CONFIG_CONFIRM_POLLS,
+    CONFIG_WRITE_API_VERSIONS,
     MAX_STATUS_RETRIES,
     MIN_STATUS_BYTES,
     MAX_TEMP_F,
     MAX_TEMP_F_PROBE,
     MIN_TEMP_F,
     MIN_TEMP_F_PROBE,
+    STATUS_PACKET_BYTES,
+    STATUS_PREFIX,
+    decode_warnings,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,10 +57,147 @@ CODE_STATUS = b"UR001!"
 # plain text, same as the serial number response), so it's surfaced as-is
 # rather than parsed into structured fields.
 CODE_FIRMWARE = b"UN!"
+# "UC" + the 8-byte config block + "!" -- single-sourced: facultymatt/gmg-js
+# (2020), whose notes record whole frames (5543050b02322020202021, "pizza mode
+# off") and whose author said it "used to work". No other project sends it.
+# The block layout it assumed has since been confirmed on APIv6 by reading
+# (see PIZZA_MODE below); the write itself is confirmed only by
+# Grill.write_config_field reading the block back afterwards, every time.
+CODE_WRITE_CONFIG = b"UC"
 
 
 class GmgCommunicationError(Exception):
     """Raised when the grill does not respond after all retries."""
+
+
+class GmgConfigWriteError(GmgCommunicationError):
+    """Raised when a config write was refused, or the grill did not end up as asked."""
+
+
+def is_status_reply(raw: bytes) -> bool:
+    """Whether a reply can be read for status: it starts UR and reaches byte 33."""
+    return len(raw) >= MIN_STATUS_BYTES and raw[:2] == STATUS_PREFIX
+
+
+def is_full_status_reply(raw: bytes) -> bool:
+    """Whether a reply is exactly one whole packet: the only kind config is read from."""
+    return len(raw) == STATUS_PACKET_BYTES and raw[:2] == STATUS_PREFIX
+
+
+# Status bytes 8-15: the GMG app's Grill Config screen. The app writes all
+# eight back at once (see Grill.write_config_field), so they are kept together.
+CONFIG_BLOCK = slice(8, 16)
+
+
+@dataclass(frozen=True)
+class ConfigField:
+    """One setting packed into the Grill Config block."""
+
+    name: str
+    index: int  # byte within the block; block[0] is status byte 8
+    shift: int
+    width: int  # bits
+    max_value: int  # highest value the app offers
+
+    @property
+    def mask(self) -> int:
+        return ((1 << self.width) - 1) << self.shift
+
+    def validate(self, value: int) -> None:
+        if not 0 <= value <= self.max_value:
+            raise ValueError(f"{self.name} must be 0-{self.max_value}, got {value}")
+
+
+# Status byte 9, decoded on a Jim Bowie (firmware 2.3, APIv6) on 16 Sep 2026 by
+# changing one setting at a time in the GMG app and reading the packet back:
+#
+#   bit 5     Pizza Mode          07 -> 27 when turned on
+#   bits 4-2  Climate, 0-4        Icy 03, Cold 07, Average 0b, Warm 0f, Hot 13
+#   bit 1     Auto-Revert WiFi    0b -> 09 when turned off
+#   bit 0     Lock Temp Display   0b -> 0a when turned off
+#
+# facultymatt/gmg-js (2020) is the only earlier source. Its numbers agree once
+# the fields are split -- its "Hot = 1" is bit 4 alone, its "Average = 8" is
+# bits 4-2 with both toggles still attached -- but it set Pizza Mode by
+# overwriting the whole top nibble, which also clears bit 4 and silently drops
+# a Hot grill to Icy. Fields here change only their own bits.
+PIZZA_MODE = ConfigField("pizza_mode", index=1, shift=5, width=1, max_value=1)
+CLIMATE = ConfigField("climate", index=1, shift=2, width=3, max_value=len(CLIMATE_SETTINGS) - 1)
+AUTO_REVERT_WIFI = ConfigField("auto_revert_wifi", index=1, shift=1, width=1, max_value=1)
+LOCK_TEMP_DISPLAY = ConfigField("lock_temp_display", index=1, shift=0, width=1, max_value=1)
+
+
+@dataclass(frozen=True)
+class GrillConfig:
+    """The Grill Config block, exactly as the grill sent it.
+
+    Bytes 10-15 are the app's temperature calibration boxes. GMG's support
+    pages say each adjustment has a left box and a right box: the grill's
+    apply at 150F and 500F, each food probe's at 32F and 212F. Which byte is
+    which box, and how a box's value is stored, is NOT confirmed -- the likely
+    reading is "value plus 20 / 50 / 25", since this grill reads 20 50 25 25
+    25 25 while the app shows 0 in every box -- so they are exposed raw and
+    never written.
+    """
+
+    block: bytes
+
+    def __post_init__(self) -> None:
+        if len(self.block) != CONFIG_BLOCK.stop - CONFIG_BLOCK.start:
+            raise ValueError(f"A config block is 8 bytes, got {len(self.block)}: {self.block!r}")
+
+    def __str__(self) -> str:
+        return self.block.hex(" ")
+
+    def get(self, field: ConfigField) -> int:
+        return (self.block[field.index] & field.mask) >> field.shift
+
+    def with_field(self, field: ConfigField, value: int) -> GrillConfig:
+        """This block with one field changed and every other bit as it was."""
+        field.validate(value)
+        block = bytearray(self.block)
+        block[field.index] = (block[field.index] & ~field.mask & 0xFF) | (value << field.shift)
+        return GrillConfig(bytes(block))
+
+    def write_frame(self) -> bytes:
+        """The command that writes this whole block to the grill."""
+        return CODE_WRITE_CONFIG + self.block + b"!"
+
+    @property
+    def api_version(self) -> int:
+        return self.block[0]
+
+    @property
+    def pizza_mode(self) -> bool:
+        return bool(self.get(PIZZA_MODE))
+
+    @property
+    def climate(self) -> int:
+        """0-4 in CLIMATE_SETTINGS order; 5-7 have never been seen."""
+        return self.get(CLIMATE)
+
+    @property
+    def auto_revert_wifi(self) -> bool:
+        return bool(self.get(AUTO_REVERT_WIFI))
+
+    @property
+    def lock_temp_display(self) -> bool:
+        return bool(self.get(LOCK_TEMP_DISPLAY))
+
+    @property
+    def grill_adjustment_raw(self) -> tuple[int, int]:
+        """Status bytes 10-11, as sent: likely the 150F and 500F boxes."""
+        return (self.block[2], self.block[3])
+
+    @property
+    def probe1_adjustment_raw(self) -> tuple[int, int]:
+        """Status bytes 12-13, as sent: likely probe 1's 32F and 212F boxes."""
+        return (self.block[4], self.block[5])
+
+    @property
+    def probe2_adjustment_raw(self) -> tuple[int, int]:
+        """Status bytes 14-15, as sent: likely probe 2's 32F and 212F boxes."""
+        return (self.block[6], self.block[7])
 
 
 def discover_grills(timeout: float = 2, ip_bind_address: str = "0.0.0.0") -> list["Grill"]:
@@ -107,12 +254,18 @@ class Grill:
     MIN_TEMP_F_PROBE = MIN_TEMP_F_PROBE
     MAX_TEMP_F_PROBE = MAX_TEMP_F_PROBE
 
+    # How write_config_field waits between read-backs. Tests replace it.
+    _sleep = staticmethod(time.sleep)
+
     def __init__(self, ip: str, serial_number: str = "") -> None:
         if not ipaddress.ip_address(ip):
             raise ValueError(f"IP address not valid: {ip}")
 
         self._ip = ip
         self._serial_number = serial_number
+        # One config write at a time: each reads the block, changes one field
+        # and writes all eight bytes back, so two at once would undo each other.
+        self._config_lock = threading.Lock()
 
     @property
     def ip(self) -> str:
@@ -156,9 +309,21 @@ class Grill:
         the failure that actually happens. Measured on one install: 112 of
         these in 25 hours, each costing a full DEFAULT_SCAN_INTERVAL (30s) of
         unavailability, recovering on its own every time.
+
+        A REPLY THAT LOST ITS HEAD IS RETRIED TOO. Checking the length alone
+        let through replies that arrived without their first bytes: 46, 48
+        and 50 bytes is plenty, but every field then sits at the wrong offset
+        and the grill reads as "on" at 601F. The UR prefix is what proves the
+        offsets are right (see STATUS_PREFIX).
         """
+        return self._poll_status(
+            is_status_reply, f"{MIN_STATUS_BYTES}+ bytes starting {STATUS_PREFIX!r}"
+        )
+
+    def _poll_status(self, usable, need: str) -> dict:
+        """Poll until a reply passes `usable`; `need` describes it for the error."""
         attempts = 0
-        last_short = None
+        last_bad = None
 
         while attempts < MAX_STATUS_RETRIES:
             response = self.send(CODE_STATUS)
@@ -167,30 +332,119 @@ class Grill:
             if response is None:
                 continue
 
-            if len(response) >= MIN_STATUS_BYTES:
+            if usable(response):
                 return self._parse_status(response)
 
-            # Long enough to arrive, too short to read. Worth a debug line
-            # rather than silence: if a grill ever returns a CONSISTENT short
-            # length, that is a protocol difference to investigate, not a
+            # Arrived, but cannot be read. Worth a debug line rather than
+            # silence: if a grill ever returns a CONSISTENT short or headless
+            # reply, that is a protocol difference to investigate, not a
             # blip to retry past.
-            last_short = response
+            last_bad = response
             _LOGGER.debug(
-                "Short status response from grill %s (%d bytes, need %d), retrying",
+                "Unusable status response from grill %s (%d bytes, starts %r), retrying",
                 self._ip,
                 len(response),
-                MIN_STATUS_BYTES,
+                response[:2],
             )
 
-        if last_short is not None:
+        if last_bad is not None:
             raise GmgCommunicationError(
-                f"Grill {self._ip} returned only short status responses in "
-                f"{MAX_STATUS_RETRIES} attempts; last was {len(last_short)} "
-                f"bytes, need {MIN_STATUS_BYTES}: {last_short!r}"
+                f"Grill {self._ip} returned no usable status response in "
+                f"{MAX_STATUS_RETRIES} attempts; last was {len(last_bad)} "
+                f"bytes, need {need}: {last_bad!r}"
             )
 
         raise GmgCommunicationError(
             f"No response from grill {self._ip} after {MAX_STATUS_RETRIES} attempts"
+        )
+
+    def write_config_field(self, field: ConfigField, value: int) -> dict:
+        """Change one Grill Config setting and confirm the grill took it.
+
+        A write replaces all eight bytes of the block, so it starts from the
+        block as the grill holds it right now -- never a remembered or default
+        copy, which would silently undo anything changed in the GMG app since.
+
+        1. Read a whole status packet. If none arrives, nothing is sent.
+        2. Refuse a grill whose config API version is not verified.
+        3. Change `field` in that block. If it already has `value`, stop.
+        4. Send UC + block + ! once. A write that did not land is reported,
+           never repeated.
+        5. Read the block back every CONFIG_CONFIRM_INTERVAL seconds. The grill
+           reporting exactly the block sent is success; any other change fails
+           at once; no change fails after CONFIG_CONFIRM_POLLS reads.
+
+        Returns the status that confirmed it. Raises ValueError for a value
+        the app does not offer (before any I/O), GmgCommunicationError if the
+        grill cannot be read, GmgConfigWriteError for a refusal or a failed
+        write. Blocking for up to ~30 s -- run it in the executor.
+        """
+        field.validate(value)
+
+        with self._config_lock:
+            current = self._poll_status(
+                is_full_status_reply,
+                f"exactly {STATUS_PACKET_BYTES} bytes starting {STATUS_PREFIX!r}",
+            )
+            before: GrillConfig = current["config"]
+
+            if before.api_version not in CONFIG_WRITE_API_VERSIONS:
+                raise GmgConfigWriteError(
+                    f"Grill {self._ip} reports config API version {before.api_version}; "
+                    f"writing settings is only verified on version "
+                    f"{', '.join(map(str, sorted(CONFIG_WRITE_API_VERSIONS)))}. "
+                    f"Nothing was sent."
+                )
+
+            if before.get(field) == value:
+                return current
+
+            expected = before.with_field(field, value)
+            _LOGGER.info(
+                "Grill %s: setting %s to %s, config block %s -> %s",
+                self._ip,
+                field.name,
+                value,
+                before,
+                expected,
+            )
+            reply = self.send(expected.write_frame())
+            _LOGGER.debug("Grill %s answered the config write with %r", self._ip, reply)
+
+            return self._confirm_config(before, expected)
+
+    def _confirm_config(self, before: GrillConfig, expected: GrillConfig) -> dict:
+        waited = CONFIG_CONFIRM_POLLS * CONFIG_CONFIRM_INTERVAL
+        seen = None
+
+        for _ in range(CONFIG_CONFIRM_POLLS):
+            self._sleep(CONFIG_CONFIRM_INTERVAL)
+            response = self.send(CODE_STATUS)
+            if response is None or not is_full_status_reply(response):
+                continue
+
+            status = self._parse_status(response)
+            seen = status["config"]
+            if seen == expected:
+                _LOGGER.debug("Grill %s confirmed config block %s", self._ip, seen)
+                return status
+            if seen != before:
+                raise GmgConfigWriteError(
+                    f"Grill {self._ip} reports config block {seen} after a write of "
+                    f"{expected} (it was {before}): something other than the "
+                    f"requested setting changed. Check Grill Config in the GMG app, "
+                    f"which can restore any setting."
+                )
+
+        if seen is None:
+            raise GmgConfigWriteError(
+                f"Grill {self._ip} sent no whole status packet in {waited} s after a "
+                f"write of {expected}, so the result is unknown (it was {before}). "
+                f"Check Grill Config in the GMG app."
+            )
+        raise GmgConfigWriteError(
+            f"Grill {self._ip} still reports config block {seen} {waited} s after a "
+            f"write of {expected}: the change did not take, and was not repeated."
         )
 
     def serial(self) -> str:
@@ -221,17 +475,22 @@ class Grill:
         if not MIN_TEMP_F <= target_temp <= MAX_TEMP_F:
             raise ValueError(f"Target temperature {target_temp} is out of range")
 
-        return self.send(b"UT" + str(target_temp).encode() + b"!")
+        return self.send(b"UT%03d!" % target_temp)
 
     def set_temp_probe(self, target_temp: int, probe_number: int):
-        """Set a food probe's target/alarm temperature."""
+        """Set a food probe's target/alarm temperature.
+
+        Always three digits, as every other implementation sends it: the
+        Aenima4six2 emulator only matches UF(\\d{3})!, so a target under 100F
+        sent as UF32! may never register on the grill.
+        """
         if not MIN_TEMP_F_PROBE <= target_temp <= MAX_TEMP_F_PROBE:
             raise ValueError(f"Target temperature {target_temp} is out of range")
 
         if probe_number == 1:
-            message = b"UF" + str(target_temp).encode() + b"!"
+            message = b"UF%03d!" % target_temp
         elif probe_number == 2:
-            message = b"Uf" + str(target_temp).encode() + b"!"
+            message = b"Uf%03d!" % target_temp
         else:
             raise ValueError(f"Unknown probe number: {probe_number}")
 
@@ -269,6 +528,12 @@ class Grill:
         # index is now combined with its paired high byte -- see
         # _combine_temp's docstring for why this isn't optional above
         # 255F, and CHANGES.md for the full verification writeup.
+        if raw[:2] != STATUS_PREFIX:
+            raise GmgCommunicationError(
+                f"Status response does not start with {STATUS_PREFIX!r}, so its "
+                f"fields cannot be located ({len(raw)} bytes): {raw!r}"
+            )
+
         values = list(raw)
 
         try:
@@ -299,6 +564,14 @@ class Grill:
             raise GmgCommunicationError(
                 f"Status response shorter than expected ({len(values)} bytes): {raw!r}"
             ) from err
+
+        # As flags, so two warnings at once both show -- see const.WARN_FLAGS.
+        parsed["warnings"] = decode_warnings(parsed["warnState"])
+
+        # Only from a whole packet -- see STATUS_PACKET_BYTES.
+        parsed["config"] = (
+            GrillConfig(bytes(raw[CONFIG_BLOCK])) if is_full_status_reply(raw) else None
+        )
 
         # Every byte, indexed by position, alongside the named fields above.
         # A meaningful chunk of this payload isn't decoded anywhere in this
