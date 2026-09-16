@@ -8,7 +8,14 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timedelta
 
-from .const import ETA_MAX_AHEAD, ETA_MIN_RATE, ETA_MIN_SAMPLES, ETA_MIN_SPAN, ETA_WINDOW
+from .const import (
+    ETA_MAX_AHEAD,
+    ETA_MIN_RISE,
+    ETA_MIN_SAMPLES,
+    ETA_MIN_SPAN,
+    ETA_MIN_SPREAD,
+    ETA_WINDOW,
+)
 
 
 class ProbeTrend:
@@ -25,9 +32,17 @@ class ProbeTrend:
         self._readings: deque[tuple[datetime, float]] = deque()
 
     def add(self, when: datetime, temperature: float) -> None:
-        """Add a reading. One that is not newer than the last is ignored."""
-        if self._readings and when <= self._readings[-1][0]:
-            return
+        """Add a reading.
+
+        One at the same moment as the last is ignored. One from before it
+        means the clock was set back: the older readings can't be placed
+        against it, so the trend starts again.
+        """
+        if self._readings:
+            if when == self._readings[-1][0]:
+                return
+            if when < self._readings[-1][0]:
+                self._readings.clear()
         self._readings.append((when, float(temperature)))
         while when - self._readings[0][0] > self._window:
             self._readings.popleft()
@@ -59,15 +74,20 @@ class ProbeTrend:
     def finish_time(self, target: float) -> datetime | None:
         """When the probe reaches `target` at the current rate.
 
-        None when that cannot honestly be said: too few readings, a stall
-        (slower than ETA_MIN_RATE) or a fall, the target already reached, or
-        a finish further off than ETA_MAX_AHEAD.
+        None when that cannot honestly be said: too few readings; readings
+        less than ETA_MIN_SPREAD apart, or a line that rises no more than
+        ETA_MIN_RISE across them (a stall, a fall, or a rise too slow to see
+        in whole degrees); the target already reached; or a finish further
+        off than ETA_MAX_AHEAD.
         """
         fit = self._fit()
         if fit is None:
             return None
         slope, level, now = fit
-        if slope * 3600 < ETA_MIN_RATE:
+        temperatures = [temperature for _, temperature in self._readings]
+        if max(temperatures) - min(temperatures) < ETA_MIN_SPREAD:
+            return None
+        if slope * (now - self._readings[0][0]).total_seconds() <= ETA_MIN_RISE:
             return None
         if level >= target or self._readings[-1][1] >= target:
             return None

@@ -123,7 +123,7 @@ class GmgFireActiveSensor(GmgEntity, BinarySensorEntity):
 
 
 class GmgCooldownFanSensor(GmgEntity, BinarySensorEntity):
-    """Whether the grill is in its post-shutdown fan cooldown (about 15 minutes)."""
+    """Whether the grill is in its post-shutdown fan cooldown (about 16 minutes)."""
 
     _attr_name = "Cooldown Fan"
     _attr_icon = "mdi:fan"

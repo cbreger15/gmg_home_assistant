@@ -22,13 +22,13 @@ Requires UDP port 8080 to be reachable between Home Assistant and the grill.
 
 One device per grill, with:
 
-- **Climate entity** -- the grill itself: on/off, cold-smoke mode, target temperature (the controller won't accept a new setpoint below 150°F, same restriction as the GMG app itself). It also shows what the grill is doing: `preheating` while the fire lights, `heating` once it's running, `fan` during the cooldown after power-off (and in cold smoke), `off`, and `idle` if it's on with any other fire state. Turning it off sends the grill's own power-off, which starts that cooldown.
+- **Climate entity** -- the grill itself: on/off, cold-smoke mode, target temperature (the controller won't accept a new setpoint below 150°F, same restriction as the GMG app itself). It also shows what the grill is doing: `preheating` while the fire lights, `heating` once it's running, `fan` during the cooldown after power-off (and in cold smoke), `off`, and `idle` if it's on with any other fire state. Turning it off sends the grill's own power-off, which starts that cooldown. (The HomeKit bridge shows `fan` as Cooling.)
 - **Probe 1 / Probe 2 temperature** (sensor) -- current reading, unavailable rather than a misleading number when nothing's plugged in
 - **Probe 1 / Probe 2 target temperature** (number) -- the alarm/target temp, settable directly, meant to be wired into an automation for "notify me when the probe hits temp" rather than treated as a pretend thermostat
-- **Probe 1 Estimated Finish Time** (timestamp sensor) -- when probe 1 should reach its target, projected from its last 20 minutes of readings. It's `unknown` during a stall or a drop and until there are 5 minutes of readings. It's `unavailable` when the grill isn't lit, the probe is unplugged or no target is set. The `rate_f_per_hour` attribute shows how fast probe 1 is rising.
+- **Probe 1 Estimated Finish Time** (timestamp sensor) -- when probe 1 should reach its target, projected from its last 20 minutes of readings. It's `unknown` until there are 5 minutes of readings, during a stall or a drop, when the rise is too slow to measure in whole degrees (under about 4.5°F an hour), and when the finish is more than a day away. It's `unavailable` when the grill is off or cooling down, the probe is unplugged or no target is set. The `rate_f_per_hour` attribute shows how fast probe 1 is rising.
 - **Probe 1 / Probe 2 connected** (binary sensor) -- whether a probe is actually plugged in
 - **Fire Active** (diagnostic binary sensor) -- on while the fire is lighting or running
-- **Cooldown Fan** (diagnostic binary sensor) -- on during the fan cooldown after power-off, about 15 minutes
+- **Cooldown Fan** (diagnostic binary sensor) -- on during the fan cooldown after power-off, about 16 minutes
 - **Warning** (binary sensor) -- the grill's own warning state, with the active warnings listed in its `warnings` attribute (e.g. `low_pellet`)
 - **Pizza Mode** (switch) -- the Pizza Mode setting from the GMG app's Grill Config screen
 - **Climate Setting** (select: Icy / Cold / Average / Warm / Hot), **Auto-Revert WiFi** and **Lock Temp Display** (switches) -- the rest of the Grill Config screen, as configuration entities
@@ -48,9 +48,11 @@ Temperature readings above 255°F, and cold-smoke mode detection, were both fixe
 [docs/automations.md](docs/automations.md) has four automations to paste into `automations.yaml`. They aren't part of the integration.
 
 - **Stall monitor** -- tells you when probe 1 has plateaued. It needs a Derivative helper; the page shows how to set it up.
-- **Hold, then shut down** -- when probe 1 reaches its target, drops the grill to 150°F, then turns it off 45 minutes later unless you've changed the setpoint.
-- **Flameout** -- turns the grill off if the fire has been out for a minute and the grill has fallen below 130°F while set to heat.
-- **Possible grease fire** -- above 400°F, a jump of more than 40°F between two readings no more than 60 seconds apart turns the grill off and sends a critical alert.
+- **Hold, then shut down** -- when probe 1 reaches its target, drops the grill to 150°F, then turns it off 45 minutes later unless you've changed the setpoint. One hold per cook.
+- **Flameout** -- turns the grill off if it has reported no fire for a minute, and fallen below 130°F, while set to heat. A real flameout may never look like that; the page explains why.
+- **Possible grease fire** -- while set to heat and above 400°F, a jump of more than 40°F between two readings no more than 60 seconds apart turns the grill off and sends a critical alert.
+
+Every shutdown is checked. If the grill doesn't read as off within 90 seconds, the automation sends the command again and tells you. The temperatures are all °F, so the automations need Home Assistant's US customary unit system.
 
 They're a backstop, not a safety system. Home Assistant reads the grill every 30 seconds, so stay within reach of a lit grill. The page lists what each automation can't catch.
 
@@ -58,7 +60,7 @@ They're a backstop, not a safety system. Home Assistant reads the grill every 30
 
 - The grill doesn't report what its auger, fan or igniter are doing, so there are no entities for them (CHANGES.md, 3.3.0). Fire Active and Cooldown Fan are worked out from the grill's power and fire states.
 - Fire state's friendly names: `default` and `fail` have never been seen on a real grill; the other five have (detail in CHANGES.md).
-- The finish time is for probe 1 only, and it's a straight line: it can't see a stall coming.
+- The finish time is for probe 1 only, and it's a straight line: it can't see a stall coming. It needs more than a degree of movement to go on, so a rise under about 4.5°F an hour shows no finish at all.
 - Warnings: only `low_pellet` has been confirmed against a real grill. The other warning names are a best reading of the sources and may be wrong.
 - The Grill Config write (`UC`) comes from a single 2020 source and has been confirmed on one grill, a Jim Bowie on APIv6 (September 2026). Each write is checked by reading the settings back.
 - The temperature calibration boxes are shown, but can't be changed from Home Assistant yet.

@@ -75,6 +75,7 @@ def is_cooldown(power_state: int | None, fire_state: int | None) -> bool | None:
         return None
     return power_state == POWER_STATE_FAN or fire_state == FIRE_STATE_COOLDOWN
 
+
 # warnState (status bytes 24-27), read as one flag per bit.
 #
 # The only real non-zero reading anyone has recorded is low pellets = 128
@@ -117,13 +118,20 @@ MAX_TEMP_F_PROBE = 257
 MAX_STATUS_RETRIES = 5
 
 # The finish-time estimate (analytics.ProbeTrend) fits a straight line through
-# the last ETA_WINDOW of a probe's readings. It needs ETA_MIN_SAMPLES readings
-# spanning ETA_MIN_SPAN. A rise slower than ETA_MIN_RATE is a stall, and a
-# finish further off than ETA_MAX_AHEAD is not worth showing.
+# the last ETA_WINDOW of a probe's readings. It needs:
+# - ETA_MIN_SAMPLES readings, spanning ETA_MIN_SPAN;
+# - readings at least ETA_MIN_SPREAD apart, lowest to highest. The grill
+#   reports whole degrees, and one 1F step is not a trend: it fits as a rise
+#   of up to 1.46F across a full window, and past 1.5F when polls are lost;
+# - a line that rises more than ETA_MIN_RISE across the readings. Anything
+#   less is a stall, a fall, or a rise too slow to measure (4.5F an hour over
+#   the full window).
+# A finish further off than ETA_MAX_AHEAD is not worth showing.
 ETA_WINDOW = timedelta(minutes=20)
 ETA_MIN_SPAN = timedelta(minutes=5)
 ETA_MIN_SAMPLES = 5
-ETA_MIN_RATE = 2.0  # F per hour -- the same line the stall automation draws
+ETA_MIN_SPREAD = 2  # F, lowest to highest reading
+ETA_MIN_RISE = 1.5  # F, along the fitted line
 ETA_MAX_AHEAD = timedelta(hours=24)
 
 # Grill Config writes (gmg.Grill.write_config_field). The block layout is
@@ -140,11 +148,13 @@ CONFIG_READ_ATTEMPTS = 10
 CONFIG_CONFIRM_POLLS = 15
 CONFIG_CONFIRM_FIRST_DELAY = 0.5  # seconds
 CONFIG_CONFIRM_INTERVAL = 2  # seconds
-# Between whole replies the Grill Config entities show the last whole block,
-# for at most this long; after that they go unavailable rather than show a
-# setting nobody has seen recently. (Status fields never age: a poll that
+# Between whole replies the Grill Config entities show the last whole block
+# for two more polls at most. The third cut reply, 90 s after the whole one,
+# takes them unavailable rather than show a setting nobody has seen recently.
+# The cut-off sits between polls (every 30 s), so a few seconds of network
+# delay either way can't decide it. (Status fields never age: a poll that
 # fails takes every entity unavailable straight away.)
-CONFIG_MAX_AGE = timedelta(seconds=90)
+CONFIG_MAX_AGE = timedelta(seconds=75)
 
 # The shortest status payload _parse_status can read. It indexes values[33]
 # (fireStatePercentage), so anything under 34 bytes cannot be parsed at all.

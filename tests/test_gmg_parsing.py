@@ -157,7 +157,7 @@ def test_a_real_cook_reads_as_its_stages():
 def test_fire_and_cooldown_rules_at_the_edges():
     is_fire_active, is_cooldown = _const.is_fire_active, _const.is_cooldown
     assert is_fire_active(None) is None
-    assert is_fire_active(198) is False  # cold smoke: the fan runs, nothing burns in the pot
+    assert is_fire_active(198) is False  # cold smoke has its own state, neither startup nor running
     assert is_fire_active(5) is False  # "fail", from brandenco's list; never seen
     assert is_cooldown(None, None) is None
     assert is_cooldown(2, None) is True  # power says fan, fire unknown

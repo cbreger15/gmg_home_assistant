@@ -34,6 +34,12 @@ GRILL = f"climate.{PREFIX}"
 FINISH = f"sensor.{PREFIX}_probe_1_estimated_finish_time"
 
 
+def _with_byte(packet: bytes, index: int, value: int) -> bytes:
+    changed = bytearray(packet)
+    changed[index] = value
+    return bytes(changed)
+
+
 @pytest.fixture(autouse=True)
 def no_real_grill(monkeypatch: pytest.MonkeyPatch) -> None:
     """Any send that gets past WireGrill fails the test instead of leaving the machine."""
@@ -48,8 +54,11 @@ def no_real_grill(monkeypatch: pytest.MonkeyPatch) -> None:
         (COOK_RUNNING, STATE_ON, STATE_OFF, "heat", "heating"),
         (COOK_COOLDOWN, STATE_OFF, STATE_ON, "off", "fan"),
         (COLD_SMOKE_36, STATE_OFF, STATE_OFF, "fan_only", "fan"),
+        # Never seen on a real grill, but possible on the wire:
+        (_with_byte(COOK_STARTUP, 32, 1), STATE_OFF, STATE_OFF, "heat", "idle"),  # on, no fire
+        (_with_byte(COOK_OFF, 30, 7), STATE_OFF, STATE_OFF, "off", None),  # power state unknown
     ],
-    ids=["off", "startup", "running", "cooldown", "cold_smoke"],
+    ids=["off", "startup", "running", "cooldown", "cold_smoke", "on_without_fire", "unknown_power"],
 )
 async def test_each_stage_of_a_cook(
     hass: HomeAssistant, packet: bytes, fire_active: str, cooldown_fan: str, mode: str, action: str
@@ -60,7 +69,7 @@ async def test_each_stage_of_a_cook(
     assert hass.states.get(COOLDOWN_FAN).state == cooldown_fan
     grill = hass.states.get(GRILL)
     assert grill.state == mode
-    assert grill.attributes["hvac_action"] == action
+    assert grill.attributes.get("hvac_action") == action
 
 
 async def test_fire_and_cooldown_stay_off_the_homekit_bridge(hass: HomeAssistant) -> None:
@@ -105,18 +114,38 @@ async def test_the_finish_time_follows_probe_1(hass: HomeAssistant, freezer) -> 
     assert abs(_finish(hass) - datetime.fromisoformat("2026-09-16 18:15:00+00:00")) <= timedelta(minutes=1)
     assert hass.states.get(FINISH).attributes["rate_f_per_hour"] == pytest.approx(60, abs=3)
 
-    # A stall: flat for 20 minutes, until the rise has left the window.
+    # A stall: flat for 20 minutes, until the rise has left the window...
     for _ in range(40):
         await reading(160)
     assert hass.states.get(FINISH).state == STATE_UNKNOWN
+    # ...then creeping up a degree. One step is no trend, wherever it sits
+    # in the window.
+    for i in range(41):
+        await reading(161)
+        assert hass.states.get(FINISH).state == STATE_UNKNOWN, f"{i + 1} polls after the step"
 
     # Nothing to estimate without a probe, a target, or a fire.
     await reading(601)  # the jack reads 601 with nothing plugged in
     assert hass.states.get(FINISH).state == STATE_UNAVAILABLE
-    await reading(160, target=0)
+    await reading(161, target=0)
     assert hass.states.get(FINISH).state == STATE_UNAVAILABLE
-    await reading(160, packet=COOK_COOLDOWN)
+    await reading(161, packet=COOK_COOLDOWN)
     assert hass.states.get(FINISH).state == STATE_UNAVAILABLE
+
+
+async def test_the_finish_time_works_in_cold_smoke(hass: HomeAssistant, freezer) -> None:
+    freezer.move_to("2026-09-16 18:00:00+00:00")
+    wire = WireGrill(with_probe1(COLD_SMOKE_36, 40, 50))
+    entry = await set_up(hass, wire)
+
+    for i in range(1, 21):
+        freezer.tick(timedelta(seconds=30))
+        wire.packet = bytearray(with_probe1(COLD_SMOKE_36, 40 + i // 4, 50))  # 30F an hour
+        await poll(hass, entry)
+
+    # 45F now, the line a little behind: 50F is due in a little over 10 minutes.
+    finish = _finish(hass) - datetime.fromisoformat("2026-09-16 18:10:00+00:00")
+    assert timedelta(minutes=10) <= finish <= timedelta(minutes=13)
 
 
 async def test_an_unplugged_probe_starts_the_trend_again(hass: HomeAssistant, freezer) -> None:

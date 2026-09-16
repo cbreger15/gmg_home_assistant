@@ -249,10 +249,11 @@ class GmgProbeFinishTimeSensor(GmgEntity, SensorEntity):
 
     A straight line through the last 20 minutes of readings (see
     analytics.ProbeTrend). Unavailable when there is nothing to estimate --
-    the grill is not cooking, the probe is unplugged, or no target is set --
-    and unknown when there is no honest estimate yet: too few readings, a
-    stall or a fall, or the target already reached. Unplugging the probe or
-    stopping the fire starts the trend again.
+    the grill is not on or in cold smoke, the probe is unplugged, or no
+    target is set -- and unknown when there is no honest estimate: too few
+    readings, a stall, a fall or a rise too slow to measure, the target
+    already reached, or a finish more than a day away. Unplugging the probe,
+    or the grill leaving on or cold smoke, starts the trend again.
     """
 
     _attr_name = "Probe 1 Estimated Finish Time"

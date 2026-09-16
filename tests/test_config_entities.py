@@ -278,24 +278,28 @@ async def test_settings_are_unavailable_until_a_whole_packet_arrives(hass: HomeA
     assert hass.states.get(CLIMATE_SETTING).state == "Average"
 
 
-async def test_settings_go_unavailable_after_90_seconds_without_a_whole_packet(
+async def test_settings_go_unavailable_by_90_seconds_without_a_whole_packet(
     hass: HomeAssistant, freezer
 ) -> None:
-    """The last whole block stands in for a cut reply, but not for ever:
-    automations must never act on a setting nobody has seen for 90 s."""
+    """The last whole block stands in for two cut replies, not for ever:
+    automations must never act on a setting nobody has seen for 90 s. The
+    cut-off sits between polls, so a poll a few seconds early or late
+    doesn't change the outcome."""
     freezer.move_to("2026-09-16 18:00:00+00:00")
     wire = WireGrill(LIVE["09"])
     entry = await _set_up(hass, wire)
 
-    for seconds in (30, 60, 90):
-        freezer.tick(timedelta(seconds=30))
+    async def cut_reply(after_seconds: int) -> None:
+        freezer.tick(timedelta(seconds=after_seconds))
         wire.script = [TAIL_CUT_51]
         await _poll(hass, entry)
-        assert hass.states.get(PIZZA).state == STATE_OFF, f"{seconds} s after the whole packet"
 
-    freezer.tick(timedelta(seconds=30))  # 120 s
-    wire.script = [TAIL_CUT_51]
-    await _poll(hass, entry)
+    await cut_reply(30)
+    assert hass.states.get(PIZZA).state == STATE_OFF, "30 s after the whole packet"
+    await cut_reply(35)
+    assert hass.states.get(PIZZA).state == STATE_OFF, "65 s: a late second poll"
+
+    await cut_reply(20)  # 85 s: an early third poll
     for entity_id in (PIZZA, AUTO_REVERT, LOCK, CLIMATE_SETTING, BLOCK):
         assert hass.states.get(entity_id).state == STATE_UNAVAILABLE, entity_id
     assert hass.states.get(GRILL).state == "off", "the status fields are still fresh"
