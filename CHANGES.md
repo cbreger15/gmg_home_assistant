@@ -5,6 +5,25 @@ while unblocking it for a current Home Assistant install, not assumed --
 see gmg.py's module docstring for the specifics on what's provably a bug
 versus what's preserved on purpose.
 
+## Corrected in the docs after 3.3.0 -- what a restart does to the hold
+
+The integration and the automations are unchanged. The page understated
+what a Home Assistant restart mid-cook does to the hold, and now says not to
+restart while the grill is cooking.
+
+- **What happens:**
+  - The hold knows it has run only while its run is still going, and a
+    restart ends that run.
+  - Home Assistant doesn't arm a template trigger that is already true when
+    it starts.
+  - So after a restart, a failed poll arms the hold. If probe 1 is still at
+    its target, the next poll starts the hold again: it sets the grill to
+    150F, even after someone has taken over, and turns it off 45 minutes
+    later unless the setpoint changes.
+- **Tried and dropped:** a fix that recorded the held target in a helper. It
+  could skip the next cook's hold altogether whenever Home Assistant didn't
+  see the grill off between cooks.
+
 ## Added to the docs after 3.3.0 -- an alert when the fire won't light
 
 The integration itself is unchanged from 3.3.0.
