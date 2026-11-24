@@ -1,0 +1,3 @@
+
+# Agent kit scripts run in Git Bash; keep them LF.
+.agent/** text eol=lf
